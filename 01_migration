@@ -1,0 +1,333 @@
+# This migration creates the `versions` table, the only schema PT requires.
+# All other migrations PT provides are optional.
+class CreateVersions < ActiveRecord::Migration[8.0]
+  # The largest text column available in all supported RDBMS is
+  # 1024^3 - 1 bytes, roughly one gibibyte.  We specify a size
+  # so that MySQL will use `longtext` instead of `text`.  Otherwise,
+  # when serializing very large objects, `text` might not be big enough.
+  TEXT_BYTES = 1_073_741_823
+
+  def change
+    create_table :versions do |t|
+      # Consider using bigint type for performance if you are going to store only numeric ids.
+      # t.bigint   :whodunnit
+      t.string   :whodunnit
+
+      # Known issue in MySQL: fractional second precision
+      # -------------------------------------------------
+      #
+      # MySQL timestamp columns do not support fractional seconds unless
+      # defined with "fractional seconds precision". MySQL users should manually
+      # add fractional seconds precision to this migration, specifically, to
+      # the `created_at` column.
+      # (https://dev.mysql.com/doc/refman/5.6/en/fractional-seconds.html)
+      #
+      # MySQL users should also upgrade to at least rails 4.2, which is the first
+      # version of ActiveRecord with support for fractional seconds in MySQL.
+      # (https://github.com/rails/rails/pull/14359)
+      #
+      # MySQL users should use the following line for `created_at`
+      # t.datetime :created_at, limit: 6
+      t.datetime :created_at
+
+      t.bigint   :item_id,   null: false
+      t.string   :item_type, null: false
+      t.string   :event,     null: false
+      t.text     :object, limit: TEXT_BYTES
+    end
+    add_index :versions, %i[item_type item_id]
+  end
+end
+
+class CreateTelemetryProviders < ActiveRecord::Migration[7.0]
+  def change
+    create_table :telemetry_providers do |t|
+      t.string :name, null: false
+      t.string :slug, null: false
+      t.string :api_base_url
+      t.boolean :is_active, default: true
+      t.jsonb :configuration_schema, default: {}
+      t.text :description
+
+      t.timestamps
+    end
+
+    add_index :telemetry_providers, :slug, unique: true
+    add_index :telemetry_providers, :is_active
+  end
+end
+class CreateTelemetryCredentials < ActiveRecord::Migration[7.0]
+  def change
+    create_table :telemetry_credentials do |t|
+      t.references :company, null: false, foreign_key: true
+      t.references :telemetry_provider, null: false, foreign_key: true
+
+      # Campo encriptado que guardará las credenciales
+      t.text :encrypted_credentials
+      t.string :encrypted_credentials_iv
+
+      t.boolean :is_active, default: true
+      t.datetime :last_sync_at
+      t.datetime :last_successful_sync_at
+
+      t.timestamps
+    end
+
+    add_index :telemetry_credentials, [ :company_id, :telemetry_provider_id ],
+              unique: true,
+              name: 'idx_credentials_company_provider'
+    add_index :telemetry_credentials, :is_active
+    add_index :telemetry_credentials, :last_sync_at
+  end
+end
+class CreateVehicleTelemetryConfigs < ActiveRecord::Migration[7.0]
+  def change
+    create_table :vehicle_telemetry_configs do |t|
+      t.references :vehicle, null: false, foreign_key: true
+      t.references :telemetry_credential, null: false, foreign_key: true
+
+      # ID del dispositivo en el sistema externo (ej: "b1B" en Geotab)
+      t.string :external_device_id, null: false
+
+      # Configuración de sincronización
+      t.string :sync_frequency, default: 'daily' # hourly, daily, manual
+      t.jsonb :data_types, default: [ 'refuels', 'charges', 'odometer' ]
+
+      t.boolean :is_active, default: true
+      t.datetime :last_sync_at
+
+      t.timestamps
+    end
+
+    # Un vehículo solo puede estar asociado a un proveedor a la vez
+    add_index :vehicle_telemetry_configs, :vehicle_id, unique: true
+    add_index :vehicle_telemetry_configs, :telemetry_credential_id
+    add_index :vehicle_telemetry_configs, :external_device_id
+    add_index :vehicle_telemetry_configs, :is_active
+  end
+end
+class CreateRefuels < ActiveRecord::Migration[7.0]
+  def change
+    create_table :refuels do |t|
+      t.references :vehicle, null: false, foreign_key: true
+
+      # Identificación del proveedor
+      t.string :external_id, null: false
+      t.string :provider_name, null: false
+
+      # Datos normalizados del repostaje
+      t.datetime :refuel_date, null: false
+      t.decimal :volume_liters, precision: 10, scale: 2
+      t.decimal :cost, precision: 10, scale: 2
+      t.string :currency_code, limit: 3
+
+      # Ubicación
+      t.decimal :location_lat, precision: 10, scale: 6
+      t.decimal :location_lng, precision: 10, scale: 6
+
+      # Datos del vehículo en el momento del repostaje
+      t.decimal :odometer_km, precision: 12, scale: 2
+      t.decimal :tank_capacity_liters, precision: 10, scale: 2
+      t.decimal :distance_since_last_refuel_km, precision: 10, scale: 2
+
+      # Metadatos
+      t.string :confidence_level
+      t.string :product_type
+
+      # JSON original del proveedor (para auditoría/debugging)
+      t.jsonb :raw_data, default: {}
+
+      t.timestamps
+    end
+
+    # Evitar duplicados: un vehículo no puede tener dos veces el mismo external_id del mismo proveedor
+    add_index :refuels, [ :vehicle_id, :external_id, :provider_name ],
+              unique: true,
+              name: 'idx_refuels_vehicle_external'
+
+    add_index :refuels, :refuel_date
+    add_index :refuels, :provider_name
+    add_index :refuels, [ :location_lat, :location_lng ], name: 'idx_refuels_location'
+  end
+end
+class CreateElectricCharges < ActiveRecord::Migration[7.0]
+  def change
+    create_table :electric_charges do |t|
+      t.references :vehicle, null: false, foreign_key: true
+
+      # Identificación del proveedor
+      t.string :external_id, null: false
+      t.string :provider_name, null: false
+
+      # Datos normalizados de la carga
+      t.datetime :start_time, null: false
+      t.integer :duration_minutes
+      t.decimal :energy_consumed_kwh, precision: 10, scale: 3
+
+      # Estado de la batería
+      t.decimal :start_soc_percent, precision: 5, scale: 2
+      t.decimal :end_soc_percent, precision: 5, scale: 2
+
+      # Tipo de carga
+      t.string :charge_type # AC, DC
+      t.boolean :charge_is_estimated
+
+      # Ubicación
+      t.decimal :location_lat, precision: 10, scale: 6
+      t.decimal :location_lng, precision: 10, scale: 6
+
+      # Datos del vehículo en el momento de la carga
+      t.decimal :odometer_km, precision: 12, scale: 2
+      t.decimal :peak_power_kw, precision: 10, scale: 3
+
+      # Mediciones detalladas de energía (específico de algunos proveedores)
+      t.decimal :measured_charger_energy_in_kwh, precision: 10, scale: 3
+      t.decimal :measured_battery_energy_in_kwh, precision: 10, scale: 3
+
+      # JSON original del proveedor
+      t.jsonb :raw_data, default: {}
+
+      t.timestamps
+    end
+
+    # Evitar duplicados
+    add_index :electric_charges, [ :vehicle_id, :external_id, :provider_name ],
+              unique: true,
+              name: 'idx_charges_vehicle_external'
+
+    add_index :electric_charges, :start_time
+    add_index :electric_charges, :provider_name
+    add_index :electric_charges, :charge_type
+    add_index :electric_charges, [ :location_lat, :location_lng ], name: 'idx_charges_location'
+  end
+end
+class CreateTelemetrySyncLogs < ActiveRecord::Migration[7.0]
+  def change
+    create_table :telemetry_sync_logs do |t|
+      t.references :telemetry_credential, null: false, foreign_key: true
+      t.references :vehicle, foreign_key: true # nullable: puede ser sync de toda la flota
+
+      # Tipo de sincronización
+      t.string :sync_type, null: false # 'refuels', 'charges', 'full', 'odometer'
+
+      # Estado
+      t.string :status, null: false # 'success', 'error', 'partial'
+
+      # Estadísticas
+      t.integer :records_processed, default: 0
+      t.integer :records_created, default: 0
+      t.integer :records_updated, default: 0
+      t.integer :records_skipped, default: 0
+
+      # Errores
+      t.text :error_message
+      t.jsonb :error_details, default: {}
+
+      # Timing
+      t.datetime :started_at
+      t.datetime :completed_at
+
+      t.timestamps
+    end
+
+    add_index :telemetry_sync_logs, :status
+    add_index :telemetry_sync_logs, :sync_type
+    add_index :telemetry_sync_logs, :started_at
+    add_index :telemetry_sync_logs, [ :telemetry_credential_id, :created_at ],
+              name: 'idx_sync_logs_credential_date'
+  end
+end
+class CreateTelemetryNormalizationErrors < ActiveRecord::Migration[7.0]
+  def change
+    create_table :telemetry_normalization_errors do |t|
+      t.references :telemetry_sync_log, null: false, foreign_key: true
+
+      # Tipo de error
+      t.string :error_type, null: false # 'validation_error', 'mapping_error', 'data_format_error'
+      t.text :error_message, null: false
+
+      # Datos que causaron el error
+      t.jsonb :raw_data, null: false
+
+      # Contexto adicional
+      t.string :provider_name
+      t.string :data_type # 'refuel', 'charge', 'trip'
+
+      # Gestión del error
+      t.boolean :resolved, default: false
+      t.datetime :resolved_at
+      t.text :resolution_notes
+
+      t.timestamps
+    end
+
+    add_index :telemetry_normalization_errors, :error_type
+    add_index :telemetry_normalization_errors, :resolved
+    add_index :telemetry_normalization_errors, :provider_name
+    add_index :telemetry_normalization_errors, :created_at
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_companies.rb
+# Solo crear si no existe ya en tu sistema
+class CreateCompanies < ActiveRecord::Migration[7.0]
+  def change
+    # Si ya tienes tabla companies, skip esta migración
+    return if table_exists?(:companies)
+
+    create_table :companies do |t|
+      t.string :name, null: false
+      t.string :tax_id
+      t.string :email
+      t.string :phone
+      t.text :address
+      t.string :city
+      t.string :state
+      t.string :postal_code
+      t.string :country
+      t.boolean :is_active, default: true
+
+      t.timestamps
+    end
+
+    add_index :companies, :tax_id, unique: true
+    add_index :companies, :is_active
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_vehicles.rb
+# Solo crear si no existe ya en tu sistema
+class CreateVehicles < ActiveRecord::Migration[7.0]
+  def change
+    # Si ya tienes tabla vehicles, skip esta migración
+    return if table_exists?(:vehicles)
+
+    create_table :vehicles do |t|
+      t.references :company, null: false, foreign_key: true
+
+      # Información básica
+      t.string :name, null: false
+      t.string :license_plate, null: false
+      t.string :vin
+      t.string :brand
+      t.string :model
+      t.integer :year
+
+      # Tipo de vehículo
+      t.string :fuel_type # combustion, electric, hybrid
+      t.decimal :tank_capacity_liters, precision: 10, scale: 2
+      t.decimal :battery_capacity_kwh, precision: 10, scale: 2
+
+      # Estado
+      t.boolean :is_active, default: true
+
+      # Metadatos adicionales
+      t.jsonb :metadata, default: {}
+
+      t.timestamps
+    end
+
+    add_index :vehicles, [ :company_id, :license_plate ], unique: true
+    add_index :vehicles, :is_active
+    add_index :vehicles, :fuel_type
+    add_index :vehicles, :vin
+  end
+end

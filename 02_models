@@ -1,0 +1,459 @@
+# app/models/company.rb
+class Company < ApplicationRecord
+  # Associations
+  has_many :vehicles, dependent: :destroy
+  has_many :telemetry_credentials, dependent: :destroy
+  has_many :telemetry_providers, through: :telemetry_credentials
+
+  # Validations
+  validates :name, presence: true
+  validates :tax_id, uniqueness: true, allow_nil: true
+  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_nil: true
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :inactive, -> { where(is_active: false) }
+
+  # Instance methods
+  def active_vehicles
+    vehicles.active
+  end
+
+  def vehicles_with_telemetry
+    vehicles.with_telemetry
+  end
+
+  def vehicles_without_telemetry
+    vehicles.without_telemetry
+  end
+
+  def has_telemetry_provider?(provider_slug)
+    telemetry_credentials.joins(:telemetry_provider)
+                        .where(telemetry_providers: { slug: provider_slug })
+                        .active
+                        .exists?
+  end
+
+  def telemetry_credential_for(provider_slug)
+    telemetry_credentials.joins(:telemetry_provider)
+                        .where(telemetry_providers: { slug: provider_slug })
+                        .active
+                        .first
+  end
+end
+# app/models/electric_charge.rb
+class ElectricCharge < ApplicationRecord
+  # Associations
+  belongs_to :vehicle
+
+  # Validations
+  validates :external_id, presence: true
+  validates :provider_name, presence: true
+  validates :start_time, presence: true
+  validates :external_id, uniqueness: { scope: [ :vehicle_id, :provider_name ] }
+  validates :energy_consumed_kwh, numericality: { greater_than: 0 }, allow_nil: true
+  validates :start_soc_percent, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 100 }, allow_nil: true
+  validates :end_soc_percent, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 100 }, allow_nil: true
+  validates :charge_type, inclusion: { in: %w[AC DC], allow_nil: true }
+
+  # Scopes
+  scope :recent, -> { order(start_time: :desc) }
+  scope :by_provider, ->(provider) { where(provider_name: provider) }
+  scope :in_date_range, ->(from, to) { where(start_time: from..to) }
+  scope :for_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
+  scope :ac_charges, -> { where(charge_type: "AC") }
+  scope :dc_charges, -> { where(charge_type: "DC") }
+  scope :with_location, -> { where.not(location_lat: nil, location_lng: nil) }
+
+  # Instance methods
+  def has_location?
+    location_lat.present? && location_lng.present?
+  end
+
+  def coordinates
+    return nil unless has_location?
+    [ location_lat, location_lng ]
+  end
+
+  def soc_gained_percent
+    return nil if start_soc_percent.nil? || end_soc_percent.nil?
+    end_soc_percent - start_soc_percent
+  end
+
+  def charging_efficiency_percent
+    return nil if measured_charger_energy_in_kwh.nil? || measured_battery_energy_in_kwh.nil?
+    return nil if measured_charger_energy_in_kwh.zero?
+
+    (measured_battery_energy_in_kwh / measured_charger_energy_in_kwh) * 100
+  end
+
+  def duration_hours
+    return nil if duration_minutes.nil?
+    duration_minutes / 60.0
+  end
+
+  def average_power_kw
+    return nil if energy_consumed_kwh.nil? || duration_hours.nil?
+    return nil if duration_hours.zero?
+
+    energy_consumed_kwh / duration_hours
+  end
+
+  # Detectores de anomalías
+  def low_efficiency?
+    return false if charging_efficiency_percent.nil?
+    charging_efficiency_percent < 80 # Menos del 80% es sospechoso
+  end
+
+  def fast_charge?
+    charge_type == "DC"
+  end
+
+  def slow_charge?
+    charge_type == "AC"
+  end
+end
+# app/models/refuel.rb
+class Refuel < ApplicationRecord
+  # Associations
+  belongs_to :vehicle
+
+  # Validations
+  validates :external_id, presence: true
+  validates :provider_name, presence: true
+  validates :refuel_date, presence: true
+  validates :external_id, uniqueness: { scope: [ :vehicle_id, :provider_name ] }
+  validates :volume_liters, numericality: { greater_than: 0 }, allow_nil: true
+  validates :cost, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+
+  # Scopes
+  scope :recent, -> { order(refuel_date: :desc) }
+  scope :by_provider, ->(provider) { where(provider_name: provider) }
+  scope :in_date_range, ->(from, to) { where(refuel_date: from..to) }
+  scope :for_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
+  scope :with_location, -> { where.not(location_lat: nil, location_lng: nil) }
+
+  # Instance methods
+  def has_location?
+    location_lat.present? && location_lng.present?
+  end
+
+  def coordinates
+    return nil unless has_location?
+    [ location_lat, location_lng ]
+  end
+
+  def consumption_per_100km
+    return nil if volume_liters.nil? || distance_since_last_refuel_km.nil?
+    return nil if distance_since_last_refuel_km.zero?
+
+    (volume_liters / distance_since_last_refuel_km) * 100
+  end
+
+  # Detectores de anomalías básicos
+  def exceeds_tank_capacity?
+    return false if volume_liters.nil? || tank_capacity_liters.nil?
+    volume_liters > tank_capacity_liters * 1.1 # 10% de margen
+  end
+
+  def suspicious_location?
+    # TODO: Implementar lógica de zonas autorizadas
+    false
+  end
+end
+# app/models/telemetry_credential.rb
+class TelemetryCredential < ApplicationRecord
+  # Encriptación (requiere gem 'attr_encrypted' o Rails 7+ encrypts)
+  # Opción 1: attr_encrypted gem
+  attr_encrypted :credentials, key: Rails.application.credentials.dig(:encryption, :key)
+
+  # Opción 2: Rails 7+ (comentar si usas attr_encrypted)
+  # encrypts :credentials
+
+  # Associations
+  belongs_to :company
+  belongs_to :telemetry_provider
+  has_many :vehicle_telemetry_configs, dependent: :destroy
+  has_many :vehicles, through: :vehicle_telemetry_configs
+  has_many :telemetry_sync_logs, dependent: :destroy
+
+  # Validations
+  validates :company_id, uniqueness: { scope: :telemetry_provider_id,
+                                       message: "already has credentials for this provider" }
+  validates :credentials, presence: true
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :for_provider, ->(provider_slug) {
+    joins(:telemetry_provider).where(telemetry_providers: { slug: provider_slug })
+  }
+  scope :needs_sync, -> {
+    where("last_sync_at IS NULL OR last_sync_at < ?", 1.hour.ago)
+  }
+
+  # Instance methods
+  def credentials_hash
+    # Deserializa las credenciales encriptadas
+    JSON.parse(credentials).with_indifferent_access
+  rescue JSON::ParserError
+    {}
+  end
+
+  def update_sync_timestamp!(successful: true)
+    attributes = { last_sync_at: Time.current }
+    attributes[:last_successful_sync_at] = Time.current if successful
+    update!(attributes)
+  end
+
+  def provider_name
+    telemetry_provider.slug
+  end
+
+  def from_date_for_sync
+    # Fecha desde la cual sincronizar (última exitosa o 30 días atrás)
+    last_successful_sync_at || 30.days.ago
+  end
+end
+# app/models/telemetry_normalization_error.rb
+class TelemetryNormalizationError < ApplicationRecord
+  # Associations
+  belongs_to :telemetry_sync_log
+
+  # Validations
+  validates :error_type, presence: true, inclusion: { in: %w[validation_error mapping_error data_format_error unknown] }
+  validates :error_message, presence: true
+  validates :raw_data, presence: true
+
+  # Scopes
+  scope :unresolved, -> { where(resolved: false) }
+  scope :resolved, -> { where(resolved: true) }
+  scope :recent, -> { order(created_at: :desc) }
+  scope :by_type, ->(type) { where(error_type: type) }
+  scope :by_provider, ->(provider) { where(provider_name: provider) }
+
+  # Instance methods
+  def resolve!(notes = nil)
+    update!(
+      resolved: true,
+      resolved_at: Time.current,
+      resolution_notes: notes
+    )
+  end
+
+  def mark_unresolved!
+    update!(
+      resolved: false,
+      resolved_at: nil,
+      resolution_notes: nil
+    )
+  end
+
+  def raw_data_hash
+    raw_data.is_a?(String) ? JSON.parse(raw_data) : raw_data
+  rescue JSON::ParserError
+    {}
+  end
+end
+# app/models/telemetry_provider.rb
+class TelemetryProvider < ApplicationRecord
+  # Associations
+  has_many :telemetry_credentials, dependent: :restrict_with_error
+
+  # Validations
+  validates :name, presence: true
+  validates :slug, presence: true, uniqueness: true, format: { with: /\A[a-z0-9_]+\z/ }
+  validates :api_base_url, presence: true, format: { with: URI::DEFAULT_PARSER.make_regexp(%w[http https]) }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :inactive, -> { where(is_active: false) }
+
+  # Class methods
+  def self.find_by_slug!(slug)
+    find_by!(slug: slug)
+  end
+
+  # Instance methods
+  def activate!
+    update!(is_active: true)
+  end
+
+  def deactivate!
+    update!(is_active: false)
+  end
+
+  def geotab?
+    slug == "geotab"
+  end
+end
+# app/models/telemetry_sync_log.rb
+class TelemetrySyncLog < ApplicationRecord
+  # Associations
+  belongs_to :telemetry_credential
+  belongs_to :vehicle, optional: true
+  has_many :telemetry_normalization_errors, dependent: :destroy
+
+  # Validations
+  validates :sync_type, presence: true, inclusion: { in: %w[refuels charges odometer trips full] }
+  validates :status, presence: true, inclusion: { in: %w[success error partial pending] }
+
+  # Scopes
+  scope :recent, -> { order(created_at: :desc) }
+  scope :successful, -> { where(status: "success") }
+  scope :failed, -> { where(status: "error") }
+  scope :partial, -> { where(status: "partial") }
+  scope :for_provider, ->(provider_slug) {
+    joins(telemetry_credential: :telemetry_provider)
+      .where(telemetry_providers: { slug: provider_slug })
+  }
+  scope :for_sync_type, ->(type) { where(sync_type: type) }
+  scope :today, -> { where("DATE(created_at) = ?", Date.current) }
+
+  # Instance methods
+  def success?
+    status == "success"
+  end
+
+  def error?
+    status == "error"
+  end
+
+  def partial?
+    status == "partial"
+  end
+
+  def duration_seconds
+    return nil if started_at.nil? || completed_at.nil?
+    completed_at - started_at
+  end
+
+  def has_errors?
+    telemetry_normalization_errors.any?
+  end
+
+  def error_count
+    telemetry_normalization_errors.count
+  end
+
+  def success_rate_percent
+    return 0 if records_processed.zero?
+    ((records_created.to_f / records_processed) * 100).round(2)
+  end
+end
+# app/models/vehicle_telemetry_config.rb
+class VehicleTelemetryConfig < ApplicationRecord
+  # Associations
+  belongs_to :vehicle
+  belongs_to :telemetry_credential
+  has_one :telemetry_provider, through: :telemetry_credential
+  has_one :company, through: :telemetry_credential
+
+  # Validations
+  validates :vehicle_id, uniqueness: { message: "can only have one telemetry configuration" }
+  validates :external_device_id, presence: true
+  validates :sync_frequency, inclusion: { in: %w[manual hourly daily weekly] }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :for_provider, ->(provider_slug) {
+    joins(telemetry_credential: :telemetry_provider)
+      .where(telemetry_providers: { slug: provider_slug })
+  }
+  scope :sync_refuels, -> { where("data_types @> ?", [ "refuels" ].to_json) }
+  scope :sync_charges, -> { where("data_types @> ?", [ "charges" ].to_json) }
+
+  # Instance methods
+  def should_sync?(data_type)
+    data_types.include?(data_type.to_s)
+  end
+
+  def provider_name
+    telemetry_credential.provider_name
+  end
+
+  def credentials_hash
+    telemetry_credential.credentials_hash
+  end
+
+  def sync_refuels?
+    should_sync?("refuels")
+  end
+
+  def sync_charges?
+    should_sync?("charges")
+  end
+
+  def sync_odometer?
+    should_sync?("odometer")
+  end
+end
+# app/models/vehicle.rb
+class Vehicle < ApplicationRecord
+  # Associations
+  belongs_to :company
+  has_one :vehicle_telemetry_config, dependent: :destroy
+  has_many :refuels, dependent: :destroy
+  has_many :electric_charges, dependent: :destroy
+  has_many :telemetry_sync_logs, dependent: :nullify
+
+  # Validations
+  validates :name, presence: true
+  validates :license_plate, presence: true, uniqueness: { scope: :company_id }
+  validates :fuel_type, inclusion: { in: %w[combustion electric hybrid], allow_nil: true }
+  validates :tank_capacity_liters, numericality: { greater_than: 0 }, allow_nil: true
+  validates :battery_capacity_kwh, numericality: { greater_than: 0 }, allow_nil: true
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :inactive, -> { where(is_active: false) }
+  scope :with_telemetry, -> { joins(:vehicle_telemetry_config).where(vehicle_telemetry_configs: { is_active: true }) }
+  scope :without_telemetry, -> { where.missing(:vehicle_telemetry_config) }
+  scope :combustion, -> { where(fuel_type: "combustion") }
+  scope :electric, -> { where(fuel_type: "electric") }
+  scope :hybrid, -> { where(fuel_type: "hybrid") }
+
+  # Instance methods
+  def has_telemetry?
+    vehicle_telemetry_config.present? && vehicle_telemetry_config.is_active?
+  end
+
+  def requires_manual_entry?
+    !has_telemetry?
+  end
+
+  def telemetry_provider_name
+    vehicle_telemetry_config&.provider_name
+  end
+
+  def is_electric?
+    fuel_type == "electric"
+  end
+
+  def is_combustion?
+    fuel_type == "combustion"
+  end
+
+  def is_hybrid?
+    fuel_type == "hybrid"
+  end
+
+  def last_refuel
+    refuels.recent.first
+  end
+
+  def last_charge
+    electric_charges.recent.first
+  end
+
+  def total_refuels_count
+    refuels.count
+  end
+
+  def total_charges_count
+    electric_charges.count
+  end
+
+  def display_name
+    "#{name} (#{license_plate})"
+  end
+end

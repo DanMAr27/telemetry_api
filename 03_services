@@ -1,0 +1,588 @@
+# app/services/telemetry/connectors/geotab_connector.rb
+module Telemetry
+  module Connectors
+    class GeotabConnector
+      API_BASE_URL = "https://my.geotab.com/apiv1"
+
+      attr_reader :credentials, :session_id, :database
+
+      def initialize(credentials_hash)
+        @credentials = credentials_hash.with_indifferent_access
+        @session_id = nil
+        @database = credentials[:database]
+      end
+
+      # Autenticación - Devuelve el session_id
+      def authenticate!
+        response = make_request(
+          method: "Authenticate",
+          params: {
+            userName: credentials[:userName],
+            password: credentials[:password],
+            database: credentials[:database]
+          }
+        )
+
+        raise AuthenticationError, "Authentication failed" unless response["result"]
+
+        @session_id = response.dig("result", "credentials", "sessionId")
+        @database = response.dig("result", "credentials", "database")
+
+        @session_id
+      end
+
+      # Método genérico para obtener datos de Geotab
+      def fetch_data(type_name:, from_date: nil, to_date: nil, search: {})
+        ensure_authenticated!
+
+        search_params = search.dup
+        search_params[:FromDate] = format_date(from_date) if from_date
+        search_params[:ToDate] = format_date(to_date) if to_date
+
+        response = make_request(
+          method: "Get",
+          params: {
+            typeName: type_name,
+            search: search_params,
+            credentials: auth_credentials
+          }
+        )
+
+        response["result"] || []
+      end
+
+      # Obtener repostajes (FillUp)
+      def fetch_fillups(from_date:, to_date: Time.current)
+        fetch_data(
+          type_name: "FillUp",
+          from_date: from_date,
+          to_date: to_date
+        )
+      end
+
+      # Obtener cargas eléctricas (ChargeEvent)
+      def fetch_charge_events(from_date:, to_date: Time.current)
+        fetch_data(
+          type_name: "ChargeEvent",
+          from_date: from_date,
+          to_date: to_date
+        )
+      end
+
+      # Obtener dispositivos (para mapeo inicial)
+      def fetch_devices
+        ensure_authenticated!
+
+        response = make_request(
+          method: "Get",
+          params: {
+            typeName: "Device",
+            credentials: auth_credentials
+          }
+        )
+
+        response["result"] || []
+      end
+
+      # Obtener datos de odómetro
+      def fetch_odometer_readings(from_date:, to_date: Time.current, device_id: nil)
+        search_params = {}
+        search_params[:DeviceSearch] = { id: device_id } if device_id
+
+        fetch_data(
+          type_name: "StatusData",
+          from_date: from_date,
+          to_date: to_date,
+          search: search_params
+        )
+      end
+
+      private
+
+      def ensure_authenticated!
+        authenticate! unless authenticated?
+      end
+
+      def authenticated?
+        @session_id.present?
+      end
+
+      def auth_credentials
+        {
+          database: @database,
+          userName: credentials[:userName],
+          sessionId: @session_id
+        }
+      end
+
+      def make_request(method:, params:)
+        uri = URI(API_BASE_URL)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = true
+        http.read_timeout = 120 # 2 minutos timeout
+
+        request = Net::HTTP::Post.new(uri.path, "Content-Type" => "application/json")
+        request.body = {
+          method: method,
+          params: params,
+          jsonrpc: "2.0",
+          id: SecureRandom.random_number(1000)
+        }.to_json
+
+        response = http.request(request)
+
+        handle_response(response)
+      rescue Net::ReadTimeout => e
+        raise TimeoutError, "Geotab API timeout: #{e.message}"
+      rescue StandardError => e
+        raise ConnectionError, "Geotab API error: #{e.message}"
+      end
+
+      def handle_response(response)
+        unless response.is_a?(Net::HTTPSuccess)
+          raise ApiError, "HTTP #{response.code}: #{response.body}"
+        end
+
+        parsed = JSON.parse(response.body)
+
+        if parsed["error"]
+          error_message = parsed.dig("error", "message") || "Unknown error"
+          raise ApiError, "Geotab API error: #{error_message}"
+        end
+
+        parsed
+      rescue JSON::ParserError => e
+        raise ApiError, "Invalid JSON response: #{e.message}"
+      end
+
+      def format_date(date)
+        date = date.to_time if date.is_a?(Date)
+        date.utc.iso8601(3) # Formato: 2025-01-01T00:00:00.000Z
+      end
+
+      # Custom Exceptions
+      class GeotabError < StandardError; end
+      class AuthenticationError < GeotabError; end
+      class ApiError < GeotabError; end
+      class TimeoutError < GeotabError; end
+      class ConnectionError < GeotabError; end
+    end
+  end
+end
+# app/services/telemetry/normalizers/geotab_normalizer.rb
+module Telemetry
+  module Normalizers
+    class GeotabNormalizer
+      PROVIDER_NAME = "geotab"
+
+      # Normaliza un repostaje de Geotab (FillUp) a nuestro modelo
+      def normalize_refuel(raw_fillup, vehicle_id)
+        {
+          vehicle_id: vehicle_id,
+          external_id: raw_fillup["id"],
+          provider_name: PROVIDER_NAME,
+          refuel_date: parse_datetime(raw_fillup["dateTime"]),
+          volume_liters: extract_volume(raw_fillup),
+          cost: raw_fillup["cost"].to_f,
+          currency_code: raw_fillup["currencyCode"]&.strip,
+          location_lat: extract_latitude(raw_fillup),
+          location_lng: extract_longitude(raw_fillup),
+          odometer_km: convert_meters_to_km(raw_fillup["odometer"]),
+          tank_capacity_liters: extract_tank_capacity(raw_fillup),
+          distance_since_last_refuel_km: convert_meters_to_km(raw_fillup["distance"]),
+          confidence_level: raw_fillup["confidence"],
+          product_type: raw_fillup["productType"],
+          raw_data: raw_fillup
+        }
+      end
+
+      # Normaliza una carga eléctrica de Geotab (ChargeEvent) a nuestro modelo
+      def normalize_charge_event(raw_charge, vehicle_id)
+        {
+          vehicle_id: vehicle_id,
+          external_id: raw_charge["id"],
+          provider_name: PROVIDER_NAME,
+          start_time: parse_datetime(raw_charge["startTime"]),
+          duration_minutes: parse_duration_minutes(raw_charge["duration"]),
+          energy_consumed_kwh: raw_charge["energyConsumedKwh"].to_f,
+          start_soc_percent: raw_charge["startStateOfCharge"].to_f,
+          end_soc_percent: raw_charge["endStateOfCharge"].to_f,
+          charge_type: raw_charge["chargeType"],
+          charge_is_estimated: raw_charge["chargeIsEstimated"],
+          location_lat: extract_latitude(raw_charge),
+          location_lng: extract_longitude(raw_charge),
+          odometer_km: raw_charge["chargingStartedOdometerKm"].to_f,
+          peak_power_kw: raw_charge["peakPowerKw"].to_f,
+          measured_charger_energy_in_kwh: raw_charge["measuredOnBoardChargerEnergyInKwh"].to_f,
+          measured_battery_energy_in_kwh: raw_charge["measuredBatteryEnergyInKwh"].to_f,
+          raw_data: raw_charge
+        }
+      end
+
+      # Valida que los datos normalizados sean válidos
+      def validate_refuel(normalized_data)
+        errors = []
+
+        errors << "Missing external_id" if normalized_data[:external_id].blank?
+        errors << "Missing refuel_date" if normalized_data[:refuel_date].blank?
+        errors << "Invalid volume" if normalized_data[:volume_liters].present? && normalized_data[:volume_liters] <= 0
+        errors << "Invalid cost" if normalized_data[:cost].present? && normalized_data[:cost] < 0
+
+        errors
+      end
+
+      def validate_charge_event(normalized_data)
+        errors = []
+
+        errors << "Missing external_id" if normalized_data[:external_id].blank?
+        errors << "Missing start_time" if normalized_data[:start_time].blank?
+        errors << "Invalid energy" if normalized_data[:energy_consumed_kwh].present? && normalized_data[:energy_consumed_kwh] <= 0
+        errors << "Invalid SOC range" if invalid_soc_range?(normalized_data)
+
+        errors
+      end
+
+      private
+
+      def parse_datetime(datetime_str)
+        return nil if datetime_str.blank?
+        Time.zone.parse(datetime_str)
+      rescue ArgumentError
+        nil
+      end
+
+      def extract_volume(fillup)
+        # Geotab puede devolver 'volume' o 'derivedVolume'
+        volume = fillup["volume"] || fillup["derivedVolume"]
+        volume.to_f if volume.present?
+      end
+
+      def extract_latitude(data)
+        data.dig("location", "y")&.to_f
+      end
+
+      def extract_longitude(data)
+        data.dig("location", "x")&.to_f
+      end
+
+      def extract_tank_capacity(fillup)
+        fillup.dig("tankCapacity", "volume")&.to_f
+      end
+
+      def convert_meters_to_km(meters)
+        return nil if meters.blank?
+        (meters.to_f / 1000.0).round(2)
+      end
+
+      def parse_duration_minutes(duration_str)
+        # Formato Geotab: "03:28:33.2580000" (HH:MM:SS.mmmmmmm)
+        return nil if duration_str.blank?
+
+        parts = duration_str.split(":")
+        hours = parts[0].to_i
+        minutes = parts[1].to_i
+        seconds = parts[2].to_f
+
+        (hours * 60) + minutes + (seconds / 60.0).round(2)
+      rescue StandardError
+        nil
+      end
+
+      def invalid_soc_range?(data)
+        start_soc = data[:start_soc_percent]
+        end_soc = data[:end_soc_percent]
+
+        return false if start_soc.blank? || end_soc.blank?
+
+        start_soc < 0 || start_soc > 100 || end_soc < 0 || end_soc > 100
+      end
+    end
+  end
+end
+# app/services/telemetry/sync_service.rb
+module Telemetry
+  class SyncService
+    attr_reader :credential, :sync_log, :stats
+
+    def initialize(telemetry_credential)
+      @credential = telemetry_credential
+      @sync_log = nil
+      @stats = {
+        processed: 0,
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        errors: []
+      }
+    end
+
+    # Sincronizar repostajes
+    def sync_refuels(vehicle_id: nil, from_date: nil, to_date: nil)
+      execute_sync(sync_type: "refuels", vehicle_id: vehicle_id) do
+        from_date ||= credential.from_date_for_sync
+        to_date ||= Time.current
+
+        connector = build_connector
+        normalizer = build_normalizer
+
+        # Obtener datos raw de Geotab
+        raw_fillups = connector.fetch_fillups(from_date: from_date, to_date: to_date)
+
+        # Procesar cada repostaje
+        raw_fillups.each do |raw_fillup|
+          process_refuel(raw_fillup, normalizer)
+        end
+      end
+    end
+
+    # Sincronizar cargas eléctricas
+    def sync_charges(vehicle_id: nil, from_date: nil, to_date: nil)
+      execute_sync(sync_type: "charges", vehicle_id: vehicle_id) do
+        from_date ||= credential.from_date_for_sync
+        to_date ||= Time.current
+
+        connector = build_connector
+        normalizer = build_normalizer
+
+        # Obtener datos raw de Geotab
+        raw_charges = connector.fetch_charge_events(from_date: from_date, to_date: to_date)
+
+        # Procesar cada carga
+        raw_charges.each do |raw_charge|
+          process_charge(raw_charge, normalizer)
+        end
+      end
+    end
+
+    # Sincronización completa
+    def sync_all(from_date: nil, to_date: nil)
+      results = {}
+
+      results[:refuels] = sync_refuels(from_date: from_date, to_date: to_date)
+      results[:charges] = sync_charges(from_date: from_date, to_date: to_date)
+
+      results
+    end
+
+    private
+
+    def execute_sync(sync_type:, vehicle_id: nil)
+      @sync_log = create_sync_log(sync_type: sync_type, vehicle_id: vehicle_id)
+      started_at = Time.current
+
+      begin
+        yield # Ejecuta el bloque de sincronización
+
+        # Actualizar log como exitoso
+        status = @stats[:errors].any? ? "partial" : "success"
+        complete_sync_log(status: status, started_at: started_at)
+
+        # Actualizar timestamp de la credencial
+        credential.update_sync_timestamp!(successful: status == "success")
+
+        build_result(success: true)
+      rescue Connectors::GeotabConnector::GeotabError => e
+        complete_sync_log(status: "error", started_at: started_at, error: e)
+        build_result(success: false, error: e.message)
+      rescue StandardError => e
+        complete_sync_log(status: "error", started_at: started_at, error: e)
+        build_result(success: false, error: e.message)
+      end
+    end
+
+    def process_refuel(raw_fillup, normalizer)
+      @stats[:processed] += 1
+
+      # Obtener el vehicle_id del dispositivo
+      vehicle = find_vehicle_by_device(raw_fillup.dig("device", "id"))
+
+      unless vehicle
+        @stats[:skipped] += 1
+        log_error(
+          raw_data: raw_fillup,
+          error_type: "mapping_error",
+          error_message: "Vehicle not found for device #{raw_fillup.dig('device', 'id')}"
+        )
+        return
+      end
+
+      # Normalizar datos
+      normalized = normalizer.normalize_refuel(raw_fillup, vehicle.id)
+
+      # Validar
+      validation_errors = normalizer.validate_refuel(normalized)
+      if validation_errors.any?
+        @stats[:skipped] += 1
+        log_error(
+          raw_data: raw_fillup,
+          error_type: "validation_error",
+          error_message: validation_errors.join(", ")
+        )
+        return
+      end
+
+      # Crear o actualizar
+      refuel = Refuel.find_or_initialize_by(
+        vehicle_id: normalized[:vehicle_id],
+        external_id: normalized[:external_id],
+        provider_name: normalized[:provider_name]
+      )
+
+      if refuel.new_record?
+        refuel.assign_attributes(normalized)
+        refuel.save!
+        @stats[:created] += 1
+      else
+        refuel.update!(normalized)
+        @stats[:updated] += 1
+      end
+
+    rescue StandardError => e
+      @stats[:skipped] += 1
+      log_error(
+        raw_data: raw_fillup,
+        error_type: "data_format_error",
+        error_message: e.message
+      )
+    end
+
+    def process_charge(raw_charge, normalizer)
+      @stats[:processed] += 1
+
+      # Obtener el vehicle_id del dispositivo
+      vehicle = find_vehicle_by_device(raw_charge.dig("device", "id"))
+
+      unless vehicle
+        @stats[:skipped] += 1
+        log_error(
+          raw_data: raw_charge,
+          error_type: "mapping_error",
+          error_message: "Vehicle not found for device #{raw_charge.dig('device', 'id')}"
+        )
+        return
+      end
+
+      # Normalizar datos
+      normalized = normalizer.normalize_charge_event(raw_charge, vehicle.id)
+
+      # Validar
+      validation_errors = normalizer.validate_charge_event(normalized)
+      if validation_errors.any?
+        @stats[:skipped] += 1
+        log_error(
+          raw_data: raw_charge,
+          error_type: "validation_error",
+          error_message: validation_errors.join(", ")
+        )
+        return
+      end
+
+      # Crear o actualizar
+      charge = ElectricCharge.find_or_initialize_by(
+        vehicle_id: normalized[:vehicle_id],
+        external_id: normalized[:external_id],
+        provider_name: normalized[:provider_name]
+      )
+
+      if charge.new_record?
+        charge.assign_attributes(normalized)
+        charge.save!
+        @stats[:created] += 1
+      else
+        charge.update!(normalized)
+        @stats[:updated] += 1
+      end
+
+    rescue StandardError => e
+      @stats[:skipped] += 1
+      log_error(
+        raw_data: raw_charge,
+        error_type: "data_format_error",
+        error_message: e.message
+      )
+    end
+
+    def find_vehicle_by_device(device_id)
+      return nil if device_id.blank?
+
+      config = VehicleTelemetryConfig
+        .where(telemetry_credential_id: credential.id)
+        .find_by(external_device_id: device_id)
+
+      config&.vehicle
+    end
+
+    def build_connector
+      case credential.provider_name
+      when "geotab"
+        Connectors::GeotabConnector.new(credential.credentials_hash)
+      else
+        raise "Unknown provider: #{credential.provider_name}"
+      end
+    end
+
+    def build_normalizer
+      case credential.provider_name
+      when "geotab"
+        Normalizers::GeotabNormalizer.new
+      else
+        raise "Unknown provider: #{credential.provider_name}"
+      end
+    end
+
+    def create_sync_log(sync_type:, vehicle_id:)
+      TelemetrySyncLog.create!(
+        telemetry_credential_id: credential.id,
+        vehicle_id: vehicle_id,
+        sync_type: sync_type,
+        status: "pending",
+        started_at: Time.current
+      )
+    end
+
+    def complete_sync_log(status:, started_at:, error: nil)
+      @sync_log.update!(
+        status: status,
+        records_processed: @stats[:processed],
+        records_created: @stats[:created],
+        records_updated: @stats[:updated],
+        records_skipped: @stats[:skipped],
+        error_message: error&.message,
+        error_details: error ? { backtrace: error.backtrace.first(5) } : {},
+        completed_at: Time.current
+      )
+    end
+
+    def log_error(raw_data:, error_type:, error_message:)
+      @stats[:errors] << {
+        error_type: error_type,
+        error_message: error_message,
+        raw_data: raw_data
+      }
+
+      TelemetryNormalizationError.create!(
+        telemetry_sync_log_id: @sync_log.id,
+        error_type: error_type,
+        error_message: error_message,
+        raw_data: raw_data,
+        provider_name: credential.provider_name,
+        data_type: @sync_log.sync_type
+      )
+    end
+
+    def build_result(success:, error: nil)
+      {
+        success: success,
+        sync_log_id: @sync_log.id,
+        stats: {
+          processed: @stats[:processed],
+          created: @stats[:created],
+          updated: @stats[:updated],
+          skipped: @stats[:skipped],
+          error_count: @stats[:errors].count
+        },
+        error: error
+      }
+    end
+  end
+end
