@@ -1,5 +1,4 @@
 # config/application.rb
-
 require_relative "boot"
 
 require "rails"
