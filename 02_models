@@ -165,7 +165,8 @@ end
 class TelemetryCredential < ApplicationRecord
   # Encriptación (requiere gem 'attr_encrypted' o Rails 7+ encrypts)
   # Opción 1: attr_encrypted gem
-  attr_encrypted :credentials, key: Rails.application.credentials.dig(:encryption, :key)
+  # attr_encrypted :credentials, key: Rails.application.credentials.dig(:encryption, :key)
+  attr_encrypted :credentials, key: ENV["ENCRYPTION_KEY"]
 
   # Opción 2: Rails 7+ (comentar si usas attr_encrypted)
   # encrypts :credentials

@@ -25,6 +25,7 @@ module V1
           params do
             optional :provider_slug, type: String, desc: "Filter by provider"
             optional :active_only, type: Boolean, default: false
+            optional :include_config_schema, type: Boolean, default: false, desc: "Include configuration schema"
           end
           get do
             authorize_company!
@@ -33,7 +34,10 @@ module V1
             credentials = credentials.for_provider(params[:provider_slug]) if params[:provider_slug]
             credentials = credentials.active if params[:active_only]
 
-            present credentials, with: Entities::TelemetryCredentialEntity, include_provider: true, include_stats: true
+            present credentials, with: Entities::TelemetryCredentialEntity,
+                    include_provider: true,
+                    include_stats: true,
+                    include_config_schema: params[:include_config_schema]
           end
 
           desc "Create telemetry credentials",
@@ -41,12 +45,9 @@ module V1
                tags: [ "Telemetry Credentials" ]
           params do
             requires :telemetry_provider_id, type: Integer, desc: "Provider ID"
-            requires :credentials, type: Hash, desc: "Provider credentials" do
-              optional :userName, type: String
-              optional :password, type: String
-              optional :database, type: String
-              optional :apiKey, type: String
-              optional :apiToken, type: String
+            requires :credentials, type: Hash, desc: "Provider credentials (dynamic based on provider schema)" do
+              # Los campos son dinámicos según el proveedor
+              # El frontend debe obtenerlos primero del endpoint GET /telemetry_providers/:id
             end
           end
           post do
@@ -57,6 +58,12 @@ module V1
             # Verificar que no exista ya una credencial para este proveedor
             existing = current_company.telemetry_credentials.find_by(telemetry_provider_id: provider.id)
             error!("Credentials already exist for this provider", 422) if existing
+
+            # Validar credenciales según schema del proveedor
+            validator = Telemetry::CredentialValidator.new(provider, params[:credentials])
+            unless validator.valid?
+              error!({ errors: validator.errors }, 422)
+            end
 
             credential = TelemetryCredential.new(
               company: current_company,
@@ -114,25 +121,35 @@ module V1
               authorize_company!
 
               credential = current_company.telemetry_credentials.find(params[:id])
+              provider_slug = credential.provider_name
 
-              case credential.provider_name
-              when "geotab"
-                connector = Telemetry::Connectors::GeotabConnector.new(credential.credentials_hash)
-                session_id = connector.authenticate!
-
-                {
-                  success: true,
-                  message: "Connection successful",
-                  session_id: session_id
-                }
-              else
-                error!("Provider not supported for testing", 422)
+              # Verificar que el proveedor esté registrado
+              unless Telemetry::ProviderRegistry.registered?(provider_slug)
+                error!("Provider '#{provider_slug}' not implemented yet", 501)
               end
 
-            rescue Telemetry::Connectors::GeotabConnector::AuthenticationError => e
-              { success: false, message: "Authentication failed: #{e.message}" }
-            rescue StandardError => e
-              { success: false, message: "Connection error: #{e.message}" }
+              # Usar el registry para obtener el connector correcto
+              connector = Telemetry::ProviderRegistry.build_connector(
+                provider_slug,
+                credential.credentials_hash
+              )
+
+              # Cada connector debe implementar authenticate!
+              session_id = connector.authenticate!
+
+              {
+                success: true,
+                message: "Connection successful",
+                provider: provider_slug,
+                session_id: session_id
+              }
+
+            rescue Telemetry::ProviderRegistry::UnknownProviderError => e
+              { success: false, message: e.message }
+            rescue => e
+              # Capturar errores específicos del conector
+              error_class = e.class.name.split("::").last
+              { success: false, message: "#{error_class}: #{e.message}" }
             end
           end
         end
@@ -152,6 +169,17 @@ module V1
         # Implementar según tu sistema de autenticación
         # Por ejemplo: @current_user.company
         Company.find(params[:company_id]) if params[:company_id]
+      end
+
+      def generate_example_credentials(provider)
+        schema_fields = provider.configuration_schema.fetch("fields", [])
+        example = {}
+
+        schema_fields.each do |field|
+          example[field["name"]] = field["placeholder"] || field["help_text"] || "your_#{field['name']}"
+        end
+
+        example
       end
     end
 
@@ -190,6 +218,26 @@ module V1
       get ":slug/details" do
         provider = TelemetryProvider.find_by_slug!(params[:slug])
         present provider, with: Entities::TelemetryProviderEntity, detailed: true
+      end
+
+      desc "Get provider configuration schema",
+           tags: [ "Telemetry Providers" ]
+      params do
+        requires :id, type: Integer, desc: "Provider ID"
+      end
+      route_param :id do
+        get :schema do
+          provider = TelemetryProvider.find(params[:id])
+
+          {
+            provider_id: provider.id,
+            provider_name: provider.name,
+            provider_slug: provider.slug,
+            is_registered: Telemetry::ProviderRegistry.registered?(provider.slug),
+            configuration_schema: provider.configuration_schema,
+            example_credentials: generate_example_credentials(provider)
+          }
+        end
       end
     end
   end

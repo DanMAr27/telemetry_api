@@ -56,13 +56,39 @@ class CreateTelemetryProviders < ActiveRecord::Migration[7.0]
     add_index :telemetry_providers, :is_active
   end
 end
+
+# db/migrate/YYYYMMDDHHMMSS_create_companies.rb
+# Solo crear si no existe ya en tu sistema
+class CreateCompanies < ActiveRecord::Migration[7.0]
+  def change
+    # Si ya tienes tabla companies, skip esta migración
+    return if table_exists?(:companies)
+
+    create_table :companies do |t|
+      t.string :name, null: false
+      t.string :tax_id
+      t.string :email
+      t.string :phone
+      t.text :address
+      t.string :city
+      t.string :state
+      t.string :postal_code
+      t.string :country
+      t.boolean :is_active, default: true
+
+      t.timestamps
+    end
+
+    add_index :companies, :tax_id, unique: true
+    add_index :companies, :is_active
+  end
+end
 class CreateTelemetryCredentials < ActiveRecord::Migration[7.0]
   def change
     create_table :telemetry_credentials do |t|
       t.references :company, null: false, foreign_key: true
       t.references :telemetry_provider, null: false, foreign_key: true
 
-      # Campo encriptado que guardará las credenciales
       t.text :encrypted_credentials
       t.string :encrypted_credentials_iv
 
@@ -78,6 +104,44 @@ class CreateTelemetryCredentials < ActiveRecord::Migration[7.0]
               name: 'idx_credentials_company_provider'
     add_index :telemetry_credentials, :is_active
     add_index :telemetry_credentials, :last_sync_at
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_vehicles.rb
+# Solo crear si no existe ya en tu sistema
+class CreateVehicles < ActiveRecord::Migration[7.0]
+  def change
+    # Si ya tienes tabla vehicles, skip esta migración
+    return if table_exists?(:vehicles)
+
+    create_table :vehicles do |t|
+      t.references :company, null: false, foreign_key: true
+
+      # Información básica
+      t.string :name, null: false
+      t.string :license_plate, null: false
+      t.string :vin
+      t.string :brand
+      t.string :model
+      t.integer :year
+
+      # Tipo de vehículo
+      t.string :fuel_type # combustion, electric, hybrid
+      t.decimal :tank_capacity_liters, precision: 10, scale: 2
+      t.decimal :battery_capacity_kwh, precision: 10, scale: 2
+
+      # Estado
+      t.boolean :is_active, default: true
+
+      # Metadatos adicionales
+      t.jsonb :metadata, default: {}
+
+      t.timestamps
+    end
+
+    add_index :vehicles, [ :company_id, :license_plate ], unique: true
+    add_index :vehicles, :is_active
+    add_index :vehicles, :fuel_type
+    add_index :vehicles, :vin
   end
 end
 class CreateVehicleTelemetryConfigs < ActiveRecord::Migration[7.0]
@@ -100,54 +164,8 @@ class CreateVehicleTelemetryConfigs < ActiveRecord::Migration[7.0]
     end
 
     # Un vehículo solo puede estar asociado a un proveedor a la vez
-    add_index :vehicle_telemetry_configs, :vehicle_id, unique: true
-    add_index :vehicle_telemetry_configs, :telemetry_credential_id
     add_index :vehicle_telemetry_configs, :external_device_id
     add_index :vehicle_telemetry_configs, :is_active
-  end
-end
-class CreateRefuels < ActiveRecord::Migration[7.0]
-  def change
-    create_table :refuels do |t|
-      t.references :vehicle, null: false, foreign_key: true
-
-      # Identificación del proveedor
-      t.string :external_id, null: false
-      t.string :provider_name, null: false
-
-      # Datos normalizados del repostaje
-      t.datetime :refuel_date, null: false
-      t.decimal :volume_liters, precision: 10, scale: 2
-      t.decimal :cost, precision: 10, scale: 2
-      t.string :currency_code, limit: 3
-
-      # Ubicación
-      t.decimal :location_lat, precision: 10, scale: 6
-      t.decimal :location_lng, precision: 10, scale: 6
-
-      # Datos del vehículo en el momento del repostaje
-      t.decimal :odometer_km, precision: 12, scale: 2
-      t.decimal :tank_capacity_liters, precision: 10, scale: 2
-      t.decimal :distance_since_last_refuel_km, precision: 10, scale: 2
-
-      # Metadatos
-      t.string :confidence_level
-      t.string :product_type
-
-      # JSON original del proveedor (para auditoría/debugging)
-      t.jsonb :raw_data, default: {}
-
-      t.timestamps
-    end
-
-    # Evitar duplicados: un vehículo no puede tener dos veces el mismo external_id del mismo proveedor
-    add_index :refuels, [ :vehicle_id, :external_id, :provider_name ],
-              unique: true,
-              name: 'idx_refuels_vehicle_external'
-
-    add_index :refuels, :refuel_date
-    add_index :refuels, :provider_name
-    add_index :refuels, [ :location_lat, :location_lng ], name: 'idx_refuels_location'
   end
 end
 class CreateElectricCharges < ActiveRecord::Migration[7.0]
@@ -199,6 +217,50 @@ class CreateElectricCharges < ActiveRecord::Migration[7.0]
     add_index :electric_charges, :provider_name
     add_index :electric_charges, :charge_type
     add_index :electric_charges, [ :location_lat, :location_lng ], name: 'idx_charges_location'
+  end
+end
+class CreateRefuels < ActiveRecord::Migration[7.0]
+  def change
+    create_table :refuels do |t|
+      t.references :vehicle, null: false, foreign_key: true
+
+      # Identificación del proveedor
+      t.string :external_id, null: false
+      t.string :provider_name, null: false
+
+      # Datos normalizados del repostaje
+      t.datetime :refuel_date, null: false
+      t.decimal :volume_liters, precision: 10, scale: 2
+      t.decimal :cost, precision: 10, scale: 2
+      t.string :currency_code, limit: 3
+
+      # Ubicación
+      t.decimal :location_lat, precision: 10, scale: 6
+      t.decimal :location_lng, precision: 10, scale: 6
+
+      # Datos del vehículo en el momento del repostaje
+      t.decimal :odometer_km, precision: 12, scale: 2
+      t.decimal :tank_capacity_liters, precision: 10, scale: 2
+      t.decimal :distance_since_last_refuel_km, precision: 10, scale: 2
+
+      # Metadatos
+      t.string :confidence_level
+      t.string :product_type
+
+      # JSON original del proveedor (para auditoría/debugging)
+      t.jsonb :raw_data, default: {}
+
+      t.timestamps
+    end
+
+    # Evitar duplicados: un vehículo no puede tener dos veces el mismo external_id del mismo proveedor
+    add_index :refuels, [ :vehicle_id, :external_id, :provider_name ],
+              unique: true,
+              name: 'idx_refuels_vehicle_external'
+
+    add_index :refuels, :refuel_date
+    add_index :refuels, :provider_name
+    add_index :refuels, [ :location_lat, :location_lng ], name: 'idx_refuels_location'
   end
 end
 class CreateTelemetrySyncLogs < ActiveRecord::Migration[7.0]
@@ -265,69 +327,5 @@ class CreateTelemetryNormalizationErrors < ActiveRecord::Migration[7.0]
     add_index :telemetry_normalization_errors, :resolved
     add_index :telemetry_normalization_errors, :provider_name
     add_index :telemetry_normalization_errors, :created_at
-  end
-end
-# db/migrate/YYYYMMDDHHMMSS_create_companies.rb
-# Solo crear si no existe ya en tu sistema
-class CreateCompanies < ActiveRecord::Migration[7.0]
-  def change
-    # Si ya tienes tabla companies, skip esta migración
-    return if table_exists?(:companies)
-
-    create_table :companies do |t|
-      t.string :name, null: false
-      t.string :tax_id
-      t.string :email
-      t.string :phone
-      t.text :address
-      t.string :city
-      t.string :state
-      t.string :postal_code
-      t.string :country
-      t.boolean :is_active, default: true
-
-      t.timestamps
-    end
-
-    add_index :companies, :tax_id, unique: true
-    add_index :companies, :is_active
-  end
-end
-# db/migrate/YYYYMMDDHHMMSS_create_vehicles.rb
-# Solo crear si no existe ya en tu sistema
-class CreateVehicles < ActiveRecord::Migration[7.0]
-  def change
-    # Si ya tienes tabla vehicles, skip esta migración
-    return if table_exists?(:vehicles)
-
-    create_table :vehicles do |t|
-      t.references :company, null: false, foreign_key: true
-
-      # Información básica
-      t.string :name, null: false
-      t.string :license_plate, null: false
-      t.string :vin
-      t.string :brand
-      t.string :model
-      t.integer :year
-
-      # Tipo de vehículo
-      t.string :fuel_type # combustion, electric, hybrid
-      t.decimal :tank_capacity_liters, precision: 10, scale: 2
-      t.decimal :battery_capacity_kwh, precision: 10, scale: 2
-
-      # Estado
-      t.boolean :is_active, default: true
-
-      # Metadatos adicionales
-      t.jsonb :metadata, default: {}
-
-      t.timestamps
-    end
-
-    add_index :vehicles, [ :company_id, :license_plate ], unique: true
-    add_index :vehicles, :is_active
-    add_index :vehicles, :fuel_type
-    add_index :vehicles, :vin
   end
 end

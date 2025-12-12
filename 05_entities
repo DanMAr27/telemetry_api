@@ -173,6 +173,25 @@ module Entities
     # Relaciones
     expose :telemetry_provider, using: TelemetryProviderEntity, if: ->(instance, options) { options[:include_provider] }
 
+    # Exponer schema de configuración del proveedor (para que frontend sepa qué campos mostrar)
+    expose :configuration_schema, if: ->(instance, options) { options[:include_config_schema] } do |instance|
+      instance.telemetry_provider.configuration_schema
+    end
+
+    # Mostrar qué campos están configurados (sin exponer valores)
+    expose :configured_fields, if: ->(instance, options) { options[:include_config_schema] } do |instance|
+      credentials = instance.credentials_hash
+      schema_fields = instance.telemetry_provider.configuration_schema.fetch("fields", [])
+
+      schema_fields.map do |field|
+        {
+          name: field["name"],
+          label: field["label"],
+          configured: credentials[field["name"]].present?
+        }
+      end
+    end
+
     # Nunca exponer las credenciales reales por seguridad
     # Solo indicar si están configuradas
     expose :has_credentials do |instance|
