@@ -43,7 +43,7 @@ gem "grape-swagger-rails", "~> 0.7"
 gem "grape-swagger-entity", "~> 0.7"
 
 # Auditoría y Soft Deletes
-gem "paper_trail", "~> 16.0"
+gem "paper_trail", "~> 17.0"
 gem "discard", "~> 1.3"
 
 # Variables de entorno

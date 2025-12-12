@@ -215,8 +215,8 @@ GEM
     nokogiri (1.18.10-x86_64-linux-gnu)
       racc (~> 1.4)
     ostruct (0.6.3)
-    paper_trail (16.0.0)
-      activerecord (>= 6.1)
+    paper_trail (17.0.0)
+      activerecord (>= 7.1)
       request_store (~> 1.4)
     parallel (1.27.0)
     parser (3.3.10.0)
@@ -373,7 +373,7 @@ DEPENDENCIES
   grape-swagger-rails (~> 0.7)
   kamal
   kaminari
-  paper_trail (~> 16.0)
+  paper_trail (~> 17.0)
   pg (~> 1.1)
   puma (>= 5.0)
   rack-cors
