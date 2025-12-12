@@ -16,4 +16,5 @@ test:
 
 production:
   <<: *default
-  database: telemetry_api_production
+  <<: *default
+  url: <%= ENV['DATABASE_URL'] %>
