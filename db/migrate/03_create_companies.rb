@@ -1,5 +1,3 @@
-# db/migrate/YYYYMMDDHHMMSS_create_companies.rb
-# Solo crear si no existe ya en tu sistema
 class CreateCompanies < ActiveRecord::Migration[7.0]
   def change
     # Si ya tienes tabla companies, skip esta migración

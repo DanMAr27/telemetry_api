@@ -1,5 +1,3 @@
-# db/migrate/YYYYMMDDHHMMSS_create_vehicles.rb
-# Solo crear si no existe ya en tu sistema
 class CreateVehicles < ActiveRecord::Migration[7.0]
   def change
     # Si ya tienes tabla vehicles, skip esta migración
