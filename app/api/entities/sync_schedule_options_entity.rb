@@ -8,11 +8,9 @@ module Entities
         { value: "monthly", label: "Mensual" }
       ]
     end
-
     expose :hours do
       (0..23).map { |h| { value: h, label: "#{h.to_s.rjust(2, '0')}:00" } }
     end
-
     expose :days_of_week do
       [
         { value: 0, label: "Domingo" },
@@ -24,7 +22,6 @@ module Entities
         { value: 6, label: "Sábado" }
       ]
     end
-
     expose :days_of_month do
       [
         { value: "start", label: "Primer día del mes" },

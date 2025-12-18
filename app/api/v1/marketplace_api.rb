@@ -2,10 +2,6 @@
 module V1
   class MarketplaceApi < Grape::API
     resource :marketplace do
-      # ========================================================================
-      # GET /api/v1/marketplace
-      # Listar todas las categorías con sus proveedores
-      # ========================================================================
       desc "Listar todas las categorías con sus proveedores disponibles"
       get do
         result = Integrations::Marketplace::ListCategoriesService.new.call
@@ -19,11 +15,6 @@ module V1
           }, 500)
         end
       end
-
-      # ========================================================================
-      # GET /api/v1/marketplace/categories/:slug
-      # Obtener una categoría específica con sus proveedores
-      # ========================================================================
       desc "Obtener detalles de una categoría específica"
       params do
         requires :slug, type: String, desc: "Slug de la categoría"
@@ -40,11 +31,6 @@ module V1
           }, 404)
         end
       end
-
-      # ========================================================================
-      # GET /api/v1/marketplace/providers
-      # Listar todos los proveedores (con filtros opcionales)
-      # ========================================================================
       desc "Listar todos los proveedores disponibles"
       params do
         optional :category_slug, type: String, desc: "Filtrar por categoría"
@@ -69,11 +55,6 @@ module V1
           }, 500)
         end
       end
-
-      # ========================================================================
-      # GET /api/v1/marketplace/providers/:slug
-      # Obtener detalles de un proveedor específico
-      # ========================================================================
       desc "Obtener detalles de un proveedor específico"
       params do
         requires :slug, type: String, desc: "Slug del proveedor (ej: geotab)"

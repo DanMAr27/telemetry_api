@@ -11,10 +11,6 @@ module V1
     resource :tenants do
       route_param :tenant_id do
         resource :integration_configurations do
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations
-          # Listar todas las configuraciones del tenant
-          # ================================================================
           desc "Listar configuraciones de integraciones del tenant"
           params do
             optional :include_provider, type: Boolean, default: false
@@ -38,11 +34,6 @@ module V1
                       with: Entities::TenantIntegrationConfigurationSummaryEntity
             end
           end
-
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Obtener detalle de una configuración
-          # ================================================================
           desc "Obtener detalle de una configuración"
           params do
             requires :id, type: Integer
@@ -59,11 +50,6 @@ module V1
                     include_computed: params[:include_computed],
                     include_auth_info: params[:include_auth_info]
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations
-          # Crear nueva configuración
-          # ================================================================
           desc "Crear nueva configuración de integración"
           params do
             requires :integration_provider_id, type: Integer, desc: "ID del proveedor"
@@ -91,12 +77,7 @@ module V1
               error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # PUT /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Actualizar configuración
-          # ================================================================
-          desc "Actualizar configuración de integración"
+         desc "Actualizar configuración de integración"
           params do
             requires :id, type: Integer
             optional :credentials, type: Hash
@@ -122,11 +103,6 @@ module V1
               error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Eliminar configuración
-          # ================================================================
           desc "Eliminar configuración de integración"
           params do
             requires :id, type: Integer
@@ -141,11 +117,6 @@ module V1
               error!({ error: "deletion_error", message: result.errors.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/activate
-          # Activar configuración
-          # ================================================================
           desc "Activar configuración"
           params do
             requires :id, type: Integer
@@ -162,11 +133,6 @@ module V1
               error!({ error: "activation_error", message: result.errors.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/deactivate
-          # Desactivar configuración
-          # ================================================================
           desc "Desactivar configuración"
           params do
             requires :id, type: Integer
@@ -183,11 +149,6 @@ module V1
               error!({ error: "deactivation_error", message: result.errors.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/test_connection
-          # Probar conexión (sin guardar)
-          # ================================================================
           desc "Probar conexión con el proveedor"
           params do
             requires :integration_provider_id, type: Integer
@@ -208,11 +169,6 @@ module V1
               }, 422)
             end
           end
-
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations/stats
-          # Estadísticas de integraciones
-          # ================================================================
           desc "Obtener estadísticas de integraciones"
           get "stats" do
             result = Integrations::TenantConfigurations::GetStatsService.new(
@@ -229,10 +185,6 @@ module V1
       end
     end
 
-    # ====================================================================
-    # ENDPOINTS AUXILIARES (fuera del scope tenant)
-    # ====================================================================
-
     resource :integration_configurations do
       # GET /api/v1/integration_configurations/sync_schedule_options
       desc "Obtener opciones para configuración de sincronización"
@@ -241,9 +193,6 @@ module V1
       end
     end
 
-    # ====================================================================
-    # MARKETPLACE - OBTENER FORMULARIO DE CREDENCIALES
-    # ====================================================================
     resource :marketplace do
       desc "Obtener formulario de credenciales de un proveedor"
       params do

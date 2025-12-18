@@ -12,8 +12,6 @@ module Entities
     expose :external_metadata
     expose :created_at
     expose :updated_at
-
-    # Información del vehículo
     expose :vehicle_info do |mapping, _options|
       {
         id: mapping.vehicle.id,
@@ -23,8 +21,6 @@ module Entities
         model: mapping.vehicle.model
       }
     end
-
-    # Información del proveedor
     expose :provider_info do |mapping, _options|
       {
         id: mapping.integration_provider.id,
@@ -32,7 +28,6 @@ module Entities
         slug: mapping.integration_provider.slug
       }
     end
-
     expose :description do |mapping, _options|
       mapping.description
     end

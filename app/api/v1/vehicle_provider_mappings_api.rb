@@ -12,10 +12,6 @@ module V1
         resource :integration_configurations do
           route_param :config_id do
             resource :vehicle_mappings do
-              # ============================================================
-              # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
-              # Listar mapeos de vehículos
-              # ============================================================
               desc "Listar mapeos de vehículos para una configuración"
               params do
                 optional :active_only, type: Boolean, default: false
@@ -27,11 +23,6 @@ module V1
 
                 present mappings, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
-              # Crear mapeo
-              # ============================================================
               desc "Crear mapeo entre vehículo y proveedor"
               params do
                 requires :vehicle_id, type: Integer
@@ -57,11 +48,6 @@ module V1
                   error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
                 end
               end
-
-              # ============================================================
-              # PUT /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
-              # Actualizar mapeo
-              # ============================================================
               desc "Actualizar mapeo"
               params do
                 requires :id, type: Integer
@@ -78,11 +64,6 @@ module V1
                   error!({ error: "validation_error", message: mapping.errors.full_messages.join(", ") }, 422)
                 end
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/activate
-              # Activar mapeo
-              # ============================================================
               desc "Activar mapeo"
               params do
                 requires :id, type: Integer
@@ -94,11 +75,6 @@ module V1
                 mapping.activate!
                 present mapping, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/deactivate
-              # Desactivar mapeo
-              # ============================================================
               desc "Desactivar mapeo"
               params do
                 requires :id, type: Integer
@@ -110,11 +86,6 @@ module V1
                 mapping.deactivate!
                 present mapping, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
-              # Eliminar mapeo
-              # ============================================================
               desc "Eliminar mapeo"
               params do
                 requires :id, type: Integer

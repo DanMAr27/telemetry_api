@@ -11,10 +11,6 @@ module V1
       route_param :tenant_id do
         resource :integration_configurations do
           route_param :config_id do
-            # ==========================================================
-            # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync
-            # Ejecutar sincronización MANUALMENTE
-            # ==========================================================
             desc "Ejecutar sincronización manual"
             params do
               requires :feature_key, type: String,
@@ -41,11 +37,6 @@ module V1
                 }, 422)
               end
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_executions
-            # Listar ejecuciones de sincronización
-            # ==========================================================
             desc "Listar ejecuciones de sincronización"
             params do
               optional :feature_key, type: String
@@ -62,11 +53,6 @@ module V1
 
               present executions, with: Entities::IntegrationSyncExecutionSummaryEntity
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/sync_executions/:id
-            # Ver detalle de una ejecución
-            # ==========================================================
             desc "Ver detalle de una ejecución"
             params do
               requires :execution_id, type: Integer
@@ -79,11 +65,6 @@ module V1
                       with: Entities::IntegrationSyncExecutionEntity,
                       include_computed: true
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/raw_data
-            # Ver datos RAW (para debugging)
-            # ==========================================================
             desc "Ver datos RAW"
             params do
               optional :status, type: String, values: %w[pending normalized failed duplicate]
@@ -98,11 +79,6 @@ module V1
 
               present raw_data, with: Entities::IntegrationRawDataEntity
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_statistics
-            # Estadísticas de sincronización
-            # ==========================================================
             desc "Estadísticas de sincronización"
             get "sync_statistics" do
               config = current_tenant.tenant_integration_configurations.find(params[:config_id])

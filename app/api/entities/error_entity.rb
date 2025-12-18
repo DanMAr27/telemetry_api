@@ -1,5 +1,4 @@
 # app/api/entities/error_entity.rb
-# Entity para respuestas de error estandarizadas
 module Entities
   class ErrorEntity < Grape::Entity
     expose :error

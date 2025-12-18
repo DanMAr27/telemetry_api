@@ -9,11 +9,9 @@ module Entities
     expose :successful_syncs_today
     expose :failed_syncs_today
     expose :last_sync_time
-
     expose :configurations_by_provider do |stats, _options|
       stats[:by_provider]
     end
-
     expose :sync_frequency_distribution do |stats, _options|
       stats[:frequency_distribution]
     end

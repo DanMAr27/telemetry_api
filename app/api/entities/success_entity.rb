@@ -1,5 +1,4 @@
 # app/api/entities/success_entity.rb
-# Entity para respuestas de éxito estandarizadas
 module Entities
   class SuccessEntity < Grape::Entity
     expose :success

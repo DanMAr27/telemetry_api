@@ -9,7 +9,6 @@ module Entities
     expose :odometer_km
     expose :fuel_type
     expose :is_estimated
-
     expose :vehicle_info do |refueling, _options|
       {
         id: refueling.vehicle.id,
@@ -17,11 +16,9 @@ module Entities
         license_plate: refueling.vehicle.license_plate
       }
     end
-
     expose :cost_per_liter do |refueling, _options|
       refueling.cost_per_liter
     end
-
     expose :from_integration do |refueling, _options|
       refueling.from_integration?
     end

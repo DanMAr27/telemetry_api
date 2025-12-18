@@ -12,10 +12,6 @@ module V1
         resource :vehicles do
           route_param :vehicle_id do
             resource :electric_charges do
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges
-              # Listar cargas de un vehículo
-              # ======================================================
               desc "Listar cargas eléctricas de un vehículo"
               params do
                 optional :from_date, type: Date
@@ -39,11 +35,6 @@ module V1
                         with: Entities::VehicleElectricChargeEntity,
                         include_computed: true
               end
-
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges/:id
-              # Detalle de una carga
-              # ======================================================
               desc "Detalle de una carga eléctrica"
               params do
                 requires :id, type: Integer
@@ -60,11 +51,6 @@ module V1
             end
           end
         end
-
-        # ============================================================
-        # GET /api/v1/tenants/:tenant_id/electric_charges
-        # Listar todas las cargas del tenant
-        # ============================================================
         resource :electric_charges do
           desc "Listar todas las cargas eléctricas del tenant"
           params do

@@ -9,13 +9,9 @@ module Entities
     expose :records_processed
     expose :records_failed
     expose :created_at
-
-    # Feature legible
     expose :feature_name do |execution, _options|
       I18n.t("features.#{execution.feature_key}", default: execution.feature_key.humanize)
     end
-
-    # Resumen de estadísticas
     expose :stats do |execution, _options|
       {
         fetched: execution.records_fetched,
@@ -24,8 +20,6 @@ module Entities
         skipped: execution.records_skipped
       }
     end
-
-    # Badge de estado
     expose :status_badge do |execution, _options|
       case execution.status
       when "running" then "info"

@@ -5,7 +5,6 @@ module Entities
     expose :execution_id
     expose :feature_key
     expose :message
-
     expose :statistics do |result, _options|
       {
         records_fetched: result[:records_fetched] || 0,
@@ -14,13 +13,10 @@ module Entities
         records_skipped: result[:records_skipped] || 0
       }
     end
-
     expose :duration_seconds
     expose :started_at
     expose :finished_at
-
     expose :errors, if: ->(result, _options) { result[:errors].present? }
-
     expose :warnings, if: ->(result, _options) { result[:warnings].present? } do |result, _options|
       result[:warnings] || []
     end

@@ -12,10 +12,6 @@ module V1
         resource :vehicles do
           route_param :vehicle_id do
             resource :refuelings do
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings
-              # Listar repostajes de un vehículo
-              # ======================================================
               desc "Listar repostajes de un vehículo"
               params do
                 optional :from_date, type: Date
@@ -37,11 +33,6 @@ module V1
                         with: Entities::VehicleRefuelingEntity,
                         include_computed: true
               end
-
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings/:id
-              # Detalle de un repostaje
-              # ======================================================
               desc "Detalle de un repostaje"
               params do
                 requires :id, type: Integer
@@ -58,11 +49,6 @@ module V1
             end
           end
         end
-
-        # ============================================================
-        # GET /api/v1/tenants/:tenant_id/refuelings
-        # Listar todos los repostajes del tenant
-        # ============================================================
         resource :refuelings do
           desc "Listar todos los repostajes del tenant"
           params do

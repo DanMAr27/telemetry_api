@@ -9,8 +9,6 @@ module Entities
     expose :last_sync_at
     expose :last_sync_status
     expose :created_at
-
-    # Información básica del proveedor
     expose :provider do |config, _options|
       {
         id: config.integration_provider.id,
@@ -19,13 +17,9 @@ module Entities
         logo_url: config.integration_provider.logo_url
       }
     end
-
-    # Contadores
     expose :enabled_features_count do |config, _options|
       config.enabled_features.size
     end
-
-    # Estado simple
     expose :status_badge do |config, _options|
       if config.is_active
         config.has_error? ? "active_with_errors" : "active"
@@ -33,8 +27,6 @@ module Entities
         "inactive"
       end
     end
-
-    # Descripción de programación
     expose :sync_schedule do |config, _options|
       config.sync_schedule_description
     end

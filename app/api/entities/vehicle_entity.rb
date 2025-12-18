@@ -1,4 +1,4 @@
-# app/api/entities/vehicle_entity.rb (Básica, asumiendo que no existe)
+# app/api/entities/vehicle_entity.rb
 module Entities
   class VehicleEntity < Grape::Entity
     expose :id

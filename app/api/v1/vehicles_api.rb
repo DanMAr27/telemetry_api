@@ -10,10 +10,6 @@ module V1
     resource :tenants do
       route_param :tenant_id do
         resource :vehicles do
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/vehicles
-          # Listar vehículos del tenant
-          # ================================================================
           desc "Listar vehículos del tenant"
           params do
             optional :status, type: String, values: Vehicle.statuses
@@ -38,11 +34,6 @@ module V1
 
             present vehicles, with: Entities::VehicleEntity
           end
-
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/vehicles/:id
-          # Obtener detalle de un vehículo
-          # ================================================================
           desc "Obtener detalle de un vehículo"
           params do
             requires :id, type: Integer
@@ -54,11 +45,6 @@ module V1
                     include_telemetry: true,
                     include_statistics: true
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/vehicles
-          # Crear vehículo
-          # ================================================================
           desc "Crear vehículo"
           params do
             requires :name, type: String
@@ -84,11 +70,6 @@ module V1
               error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # PUT /api/v1/tenants/:tenant_id/vehicles/:id
-          # Actualizar vehículo
-          # ================================================================
           desc "Actualizar vehículo"
           params do
             requires :id, type: Integer
@@ -117,11 +98,6 @@ module V1
               error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # DELETE /api/v1/tenants/:tenant_id/vehicles/:id
-          # Eliminar vehículo
-          # ================================================================
           desc "Eliminar vehículo"
           params do
             requires :id, type: Integer

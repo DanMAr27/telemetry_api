@@ -19,39 +19,28 @@ module Entities
     expose :provider_metadata, if: { include_metadata: true }
     expose :created_at
     expose :updated_at
-
-    # Relaciones opcionales
     expose :vehicle, using: Entities::VehicleEntity, if: { include_vehicle: true }
     expose :integration_raw_data,
            using: Entities::IntegrationRawDataEntity,
            if: { include_raw_data: true }
-
-    # Campos computados
     expose :cost_per_liter, if: { include_computed: true } do |refueling, _options|
       refueling.cost_per_liter
     end
-
     expose :has_location, if: { include_computed: true } do |refueling, _options|
       refueling.has_location?
     end
-
     expose :has_cost, if: { include_computed: true } do |refueling, _options|
       refueling.has_cost?
     end
-
     expose :from_integration, if: { include_computed: true } do |refueling, _options|
       refueling.from_integration?
     end
-
     expose :coordinates, if: { include_computed: true } do |refueling, _options|
       refueling.coordinates
     end
-
     expose :description, if: { include_computed: true } do |refueling, _options|
       refueling.description
     end
-
-    # Información del vehículo (básica)
     expose :vehicle_info, unless: { include_vehicle: true } do |refueling, _options|
       {
         id: refueling.vehicle.id,
@@ -59,13 +48,9 @@ module Entities
         license_plate: refueling.vehicle.license_plate
       }
     end
-
-    # Badge para tipo de dato
     expose :data_source_badge do |refueling, _options|
       refueling.from_integration? ? "integration" : "manual"
     end
-
-    # Badge para tipo de dato
     expose :estimation_badge do |refueling, _options|
       refueling.is_estimated ? "estimated" : "measured"
     end

@@ -10,11 +10,7 @@ module Entities
     expose :is_active
     expose :created_at
     expose :updated_at
-
-    # Para listado con providers incluidos
     expose :integration_providers, using: Entities::IntegrationProviderEntity, if: { include_providers: true }
-
-    # Contador de providers activos
     expose :active_providers_count, if: { include_counts: true } do |category, _options|
       category.integration_providers.active.count
     end

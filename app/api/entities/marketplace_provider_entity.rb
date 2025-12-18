@@ -1,5 +1,4 @@
 # app/api/entities/marketplace_provider_entity.rb
-# Entity especializada para el marketplace (vista pública)
 module Entities
   class MarketplaceProviderEntity < Grape::Entity
     expose :id
@@ -10,14 +9,10 @@ module Entities
     expose :website_url
     expose :status
     expose :is_premium
-
-    # Features disponibles
     expose :features do |provider, _options|
       features = provider.integration_features.active.ordered
       Entities::MarketplaceFeatureEntity.represent(features)
     end
-
-    # Info de autenticación (sin credenciales)
     expose :auth_info, if: { include_auth: true } do |provider, _options|
       schema = provider.integration_auth_schema
       next nil unless schema&.is_active?
@@ -28,7 +23,6 @@ module Entities
         has_examples: schema.example_credentials.present?
       }
     end
-
     expose :badge do |provider, _options|
       case provider.status
       when "beta" then "Beta"

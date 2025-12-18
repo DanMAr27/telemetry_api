@@ -1,155 +1,224 @@
-# app/api/v1/telemetry_credentials_api.rb
+# app/api/v1/marketplace.rb
 module V1
-  class TelemetryCredentialsApi < Grape::API
-    version "v1", using: :path
-    format :json
-    prefix :api
+  class MarketplaceApi < Grape::API
+    resource :marketplace do
+      # ========================================================================
+      # GET /api/v1/marketplace
+      # Listar todas las categorías con sus proveedores
+      # ========================================================================
+      desc "Listar todas las categorías con sus proveedores disponibles"
+      get do
+        result = Integrations::Marketplace::ListCategoriesService.new.call
 
-    helpers do
-      def current_company
-        Company.find(params[:company_id]) if params[:company_id]
+        if result.success?
+          present result.data, with: Entities::MarketplaceCategoryEntity
+        else
+          error!({
+            error: "internal_error",
+            message: result.errors.join(", ")
+          }, 500)
+        end
       end
 
-      def authorize_company!
-        error!("Company not found", 404) unless current_company
+      # ========================================================================
+      # GET /api/v1/marketplace/categories/:slug
+      # Obtener una categoría específica con sus proveedores
+      # ========================================================================
+      desc "Obtener detalles de una categoría específica"
+      params do
+        requires :slug, type: String, desc: "Slug de la categoría"
+      end
+      get "categories/:slug" do
+        result = Integrations::Marketplace::GetCategoryService.new(params[:slug]).call
+
+        if result.success?
+          present result.data, with: Entities::MarketplaceCategoryEntity
+        else
+          error!({
+            error: "not_found",
+            message: result.errors.join(", ")
+          }, 404)
+        end
+      end
+
+      # ========================================================================
+      # GET /api/v1/marketplace/providers
+      # Listar todos los proveedores (con filtros opcionales)
+      # ========================================================================
+      desc "Listar todos los proveedores disponibles"
+      params do
+        optional :category_slug, type: String, desc: "Filtrar por categoría"
+        optional :is_premium, type: Boolean, desc: "Filtrar por premium"
+        optional :status, type: String, values: %w[active beta], desc: "Filtrar por estado"
+      end
+      get "providers" do
+        filters = {
+          category_slug: params[:category_slug],
+          is_premium: params[:is_premium],
+          status: params[:status]
+        }.compact
+
+        result = Integrations::Marketplace::ListProvidersService.new(filters).call
+
+        if result.success?
+          present result.data, with: Entities::MarketplaceProviderEntity, include_auth: true
+        else
+          error!({
+            error: "internal_error",
+            message: result.errors.join(", ")
+          }, 500)
+        end
+      end
+
+      # ========================================================================
+      # GET /api/v1/marketplace/providers/:slug
+      # Obtener detalles de un proveedor específico
+      # ========================================================================
+      desc "Obtener detalles de un proveedor específico"
+      params do
+        requires :slug, type: String, desc: "Slug del proveedor (ej: geotab)"
+      end
+      get "providers/:slug" do
+        result = Integrations::Marketplace::GetProviderService.new(params[:slug]).call
+
+        if result.success?
+          present result.data, with: Entities::MarketplaceProviderEntity, include_auth: true
+        else
+          error!({
+            error: "not_found",
+            message: result.errors.join(", ")
+          }, 404)
+        end
+      end
+    end
+  end
+end
+# app/api/v1/sync_executions.rb
+module V1
+  class SyncExecutionsApi < Grape::API
+    helpers do
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
       end
     end
 
-    resource :companies do
-      route_param :company_id do
-        resource :telemetry_credentials do
-          desc "List company telemetry credentials",
-               success: Entities::TelemetryCredentialEntity,
-               is_array: true,
-               tags: [ "Telemetry Credentials" ]
-          params do
-            optional :provider_slug, type: String, desc: "Filter by provider"
-            optional :active_only, type: Boolean, default: false
-            optional :include_config_schema, type: Boolean, default: false, desc: "Include configuration schema"
-          end
-          get do
-            authorize_company!
-
-            credentials = current_company.telemetry_credentials
-            credentials = credentials.for_provider(params[:provider_slug]) if params[:provider_slug]
-            credentials = credentials.active if params[:active_only]
-
-            present credentials, with: Entities::TelemetryCredentialEntity,
-                    include_provider: true,
-                    include_stats: true,
-                    include_config_schema: params[:include_config_schema]
-          end
-
-          desc "Create telemetry credentials",
-               success: Entities::TelemetryCredentialEntity,
-               tags: [ "Telemetry Credentials" ]
-          params do
-            requires :telemetry_provider_id, type: Integer, desc: "Provider ID"
-            requires :credentials, type: Hash, desc: "Provider credentials (dynamic based on provider schema)" do
-              # Los campos son dinámicos según el proveedor
-              # El frontend debe obtenerlos primero del endpoint GET /telemetry_providers/:id
+    resource :tenants do
+      route_param :tenant_id do
+        resource :integration_configurations do
+          route_param :config_id do
+            # ==========================================================
+            # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync
+            # Ejecutar sincronización MANUALMENTE
+            # ==========================================================
+            desc "Ejecutar sincronización manual"
+            params do
+              requires :feature_key, type: String,
+                        values: %w[fuel battery trips real_time_location],
+                        desc: "Feature a sincronizar"
             end
-          end
-          post do
-            authorize_company!
+            post "sync" do
+              config = current_tenant.tenant_integration_configurations.find(params[:config_id])
 
-            provider = TelemetryProvider.find(params[:telemetry_provider_id])
+              # Ejecutar sincronización
+              result = Integrations::Sync::SyncExecutionService.new(
+                config,
+                params[:feature_key],
+                manual: true
+              ).call
 
-            # Verificar que no exista ya una credencial para este proveedor
-            existing = current_company.telemetry_credentials.find_by(telemetry_provider_id: provider.id)
-            error!("Credentials already exist for this provider", 422) if existing
-
-            # Validar credenciales según schema del proveedor
-            validator = Telemetry::CredentialValidator.new(provider, params[:credentials])
-            unless validator.valid?
-              error!({ errors: validator.errors }, 422)
-            end
-
-            credential = TelemetryCredential.new(
-              company: current_company,
-              telemetry_provider: provider,
-              credentials: params[:credentials].to_json,
-              is_active: true
-            )
-
-            if credential.save
-              present credential, with: Entities::TelemetryCredentialEntity, include_provider: true
-            else
-              error!(credential.errors.full_messages, 422)
-            end
-          end
-
-          desc "Update telemetry credentials",
-               success: Entities::TelemetryCredentialEntity,
-               tags: [ "Telemetry Credentials" ]
-          params do
-            requires :id, type: Integer, desc: "Credential ID"
-            optional :credentials, type: Hash, desc: "Updated credentials"
-            optional :is_active, type: Boolean, desc: "Active status"
-          end
-          route_param :id do
-            put do
-              authorize_company!
-
-              credential = current_company.telemetry_credentials.find(params[:id])
-
-              update_params = {}
-              update_params[:credentials] = params[:credentials].to_json if params[:credentials]
-              update_params[:is_active] = params[:is_active] if params.key?(:is_active)
-
-              if credential.update(update_params)
-                present credential, with: Entities::TelemetryCredentialEntity, include_provider: true
+              if result.success?
+                present result.data, with: Entities::SyncResultEntity
               else
-                error!(credential.errors.full_messages, 422)
+                error!({
+                  error: "sync_error",
+                  message: result.errors.join(", "),
+                  execution_id: result.data&.dig(:execution_id)
+                }, 422)
               end
             end
 
-            desc "Delete telemetry credentials",
-                 tags: [ "Telemetry Credentials" ]
-            delete do
-              authorize_company!
+            # ==========================================================
+            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_executions
+            # Listar ejecuciones de sincronización
+            # ==========================================================
+            desc "Listar ejecuciones de sincronización"
+            params do
+              optional :feature_key, type: String
+              optional :status, type: String, values: %w[running completed failed]
+              optional :limit, type: Integer, default: 50
+            end
+            get "sync_executions" do
+              config = current_tenant.tenant_integration_configurations.find(params[:config_id])
 
-              credential = current_company.telemetry_credentials.find(params[:id])
-              credential.destroy
+              executions = config.integration_sync_executions.recent
+              executions = executions.by_feature(params[:feature_key]) if params[:feature_key]
+              executions = executions.where(status: params[:status]) if params[:status]
+              executions = executions.limit(params[:limit])
 
-              { success: true, message: "Credentials deleted successfully" }
+              present executions, with: Entities::IntegrationSyncExecutionSummaryEntity
             end
 
-            desc "Test telemetry credentials connection",
-                 tags: [ "Telemetry Credentials" ]
-            post :test do
-              authorize_company!
+            # ==========================================================
+            # GET /api/v1/tenants/:tenant_id/sync_executions/:id
+            # Ver detalle de una ejecución
+            # ==========================================================
+            desc "Ver detalle de una ejecución"
+            params do
+              requires :execution_id, type: Integer
+            end
+            get "sync_executions/:execution_id" do
+              config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+              execution = config.integration_sync_executions.find(params[:execution_id])
 
-              credential = current_company.telemetry_credentials.find(params[:id])
-              provider_slug = credential.provider_name
+              present execution,
+                      with: Entities::IntegrationSyncExecutionEntity,
+                      include_computed: true
+            end
 
-              # Verificar que el proveedor esté registrado
-              unless Telemetry::ProviderRegistry.registered?(provider_slug)
-                error!("Provider '#{provider_slug}' not implemented yet", 501)
-              end
+            # ==========================================================
+            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/raw_data
+            # Ver datos RAW (para debugging)
+            # ==========================================================
+            desc "Ver datos RAW"
+            params do
+              optional :status, type: String, values: %w[pending normalized failed duplicate]
+              optional :limit, type: Integer, default: 100
+            end
+            get "raw_data" do
+              config = current_tenant.tenant_integration_configurations.find(params[:config_id])
 
-              # Usar el registry para obtener el connector correcto
-              connector = Telemetry::ProviderRegistry.build_connector(
-                provider_slug,
-                credential.credentials_hash
-              )
+              raw_data = config.integration_raw_data.recent
+              raw_data = raw_data.where(processing_status: params[:status]) if params[:status]
+              raw_data = raw_data.limit(params[:limit])
 
-              # Cada connector debe implementar authenticate!
-              session_id = connector.authenticate!
+              present raw_data, with: Entities::IntegrationRawDataEntity
+            end
 
-              {
-                success: true,
-                message: "Connection successful",
-                provider: provider_slug,
-                session_id: session_id
+            # ==========================================================
+            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_statistics
+            # Estadísticas de sincronización
+            # ==========================================================
+            desc "Estadísticas de sincronización"
+            get "sync_statistics" do
+              config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+
+              stats = {
+                total_executions: config.integration_sync_executions.count,
+                completed_executions: config.integration_sync_executions.completed.count,
+                failed_executions: config.integration_sync_executions.failed.count,
+                running_executions: config.integration_sync_executions.running.count,
+                total_raw_records: config.integration_raw_data.count,
+                pending_records: config.integration_raw_data.pending.count,
+                normalized_records: config.integration_raw_data.normalized.count,
+                failed_records: config.integration_raw_data.failed.count,
+                duplicate_records: config.integration_raw_data.duplicate.count,
+                last_sync_at: config.last_sync_at,
+                next_sync_at: config.calculate_next_sync_at,
+                by_feature: config.integration_sync_executions.group(:feature_key).count,
+                by_status: config.integration_sync_executions.group(:status).count
               }
 
-            rescue Telemetry::ProviderRegistry::UnknownProviderError => e
-              { success: false, message: e.message }
-            rescue => e
-              # Capturar errores específicos del conector
-              error_class = e.class.name.split("::").last
-              { success: false, message: "#{error_class}: #{e.message}" }
+              present stats, with: Entities::SyncStatisticsEntity
             end
           end
         end
@@ -157,430 +226,506 @@ module V1
     end
   end
 end
-# app/api/v1/telemetry_providers_api.rb
+# app/api/v1/tenant_integration_configurations.rb
 module V1
-  class TelemetryProvidersApi < Grape::API
-    version "v1", using: :path
-    format :json
-    prefix :api
-
+  class TenantIntegrationConfigurationsApi < Grape::API
+    # Helper para obtener tenant actual
     helpers do
-      def current_company
-        # Implementar según tu sistema de autenticación
-        # Por ejemplo: @current_user.company
-        Company.find(params[:company_id]) if params[:company_id]
-      end
-
-      def generate_example_credentials(provider)
-        schema_fields = provider.configuration_schema.fetch("fields", [])
-        example = {}
-
-        schema_fields.each do |field|
-          example[field["name"]] = field["placeholder"] || field["help_text"] || "your_#{field['name']}"
-        end
-
-        example
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
       end
     end
 
-    resource :telemetry_providers do
-      desc "List all available telemetry providers",
-           success: Entities::TelemetryProviderEntity,
-           is_array: true,
-           tags: [ "Telemetry Providers" ]
-      params do
-        optional :active_only, type: Boolean, default: true, desc: "Filter only active providers"
-      end
-      get do
-        providers = params[:active_only] ? TelemetryProvider.active : TelemetryProvider.all
-        present providers, with: Entities::TelemetryProviderEntity
-      end
+    resource :tenants do
+      route_param :tenant_id do
+        resource :integration_configurations do
+          # ================================================================
+          # GET /api/v1/tenants/:tenant_id/integration_configurations
+          # Listar todas las configuraciones del tenant
+          # ================================================================
+          desc "Listar configuraciones de integraciones del tenant"
+          params do
+            optional :include_provider, type: Boolean, default: false
+            optional :include_features, type: Boolean, default: false
+            optional :include_computed, type: Boolean, default: true
+            optional :active_only, type: Boolean, default: false
+          end
+          get do
+            configs = current_tenant.tenant_integration_configurations
+            configs = configs.active if params[:active_only]
+            configs = configs.includes(:integration_provider).order(created_at: :desc)
 
-      desc "Get a specific telemetry provider",
-           success: Entities::TelemetryProviderEntity,
-           tags: [ "Telemetry Providers" ]
-      params do
-        requires :id, type: Integer, desc: "Provider ID"
-      end
-      route_param :id do
-        get do
-          provider = TelemetryProvider.find(params[:id])
-          present provider, with: Entities::TelemetryProviderEntity, detailed: true
-        end
-      end
+            if params[:include_provider] || params[:include_features]
+              present configs,
+                      with: Entities::TenantIntegrationConfigurationEntity,
+                      include_provider: params[:include_provider],
+                      include_features: params[:include_features],
+                      include_computed: params[:include_computed]
+            else
+              present configs,
+                      with: Entities::TenantIntegrationConfigurationSummaryEntity
+            end
+          end
 
-      desc "Get provider by slug",
-           success: Entities::TelemetryProviderEntity,
-           tags: [ "Telemetry Providers" ]
-      params do
-        requires :slug, type: String, desc: "Provider slug (e.g., geotab)"
-      end
-      get ":slug/details" do
-        provider = TelemetryProvider.find_by_slug!(params[:slug])
-        present provider, with: Entities::TelemetryProviderEntity, detailed: true
-      end
+          # ================================================================
+          # GET /api/v1/tenants/:tenant_id/integration_configurations/:id
+          # Obtener detalle de una configuración
+          # ================================================================
+          desc "Obtener detalle de una configuración"
+          params do
+            requires :id, type: Integer
+            optional :include_features, type: Boolean, default: true
+            optional :include_computed, type: Boolean, default: true
+            optional :include_auth_info, type: Boolean, default: false
+          end
+          get ":id" do
+            config = current_tenant.tenant_integration_configurations.find(params[:id])
 
-      desc "Get provider configuration schema",
-           tags: [ "Telemetry Providers" ]
-      params do
-        requires :id, type: Integer, desc: "Provider ID"
-      end
-      route_param :id do
-        get :schema do
-          provider = TelemetryProvider.find(params[:id])
+            present config,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_features: params[:include_features],
+                    include_computed: params[:include_computed],
+                    include_auth_info: params[:include_auth_info]
+          end
 
-          {
-            provider_id: provider.id,
-            provider_name: provider.name,
-            provider_slug: provider.slug,
-            is_registered: Telemetry::ProviderRegistry.registered?(provider.slug),
-            configuration_schema: provider.configuration_schema,
-            example_credentials: generate_example_credentials(provider)
-          }
-        end
-      end
-    end
-  end
-end
-# app/api/v1/telemetry_sync_api.rb
-module V1
-  class TelemetrySyncApi < Grape::API
-    version "v1", using: :path
-    format :json
-    prefix :api
+          # ================================================================
+          # POST /api/v1/tenants/:tenant_id/integration_configurations
+          # Crear nueva configuración
+          # ================================================================
+          desc "Crear nueva configuración de integración"
+          params do
+            requires :integration_provider_id, type: Integer, desc: "ID del proveedor"
+            requires :credentials, type: Hash, desc: "Credenciales de autenticación" do
+              # Dinámico según el proveedor
+            end
+            optional :enabled_features, type: Array[String], default: [], desc: "Features a sincronizar"
+            optional :sync_frequency, type: String, values: %w[daily weekly monthly], default: "daily"
+            optional :sync_hour, type: Integer, values: 0..23, default: 2
+            optional :sync_day_of_week, type: Integer, values: 0..6, desc: "Solo para weekly"
+            optional :sync_day_of_month, type: String, values: %w[start end], desc: "Solo para monthly"
+            optional :sync_config, type: Hash, default: {}
+          end
+          post do
+            result = Integrations::TenantConfigurations::CreateService.new(
+              current_tenant,
+              declared(params, include_missing: false)
+            ).call
 
-    helpers do
-      def current_company
-        Company.find(params[:company_id]) if params[:company_id]
-      end
+            if result.success?
+              present result.data,
+                      with: Entities::TenantIntegrationConfigurationEntity,
+                      include_computed: true
+            else
+              error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
+            end
+          end
 
-      def authorize_company!
-        error!("Company not found", 404) unless current_company
-      end
+          # ================================================================
+          # PUT /api/v1/tenants/:tenant_id/integration_configurations/:id
+          # Actualizar configuración
+          # ================================================================
+          desc "Actualizar configuración de integración"
+          params do
+            requires :id, type: Integer
+            optional :credentials, type: Hash
+            optional :enabled_features, type: Array[String]
+            optional :sync_frequency, type: String, values: %w[daily weekly monthly]
+            optional :sync_hour, type: Integer, values: 0..23
+            optional :sync_day_of_week, type: Integer, values: 0..6
+            optional :sync_day_of_month, type: String, values: %w[start end]
+            optional :sync_config, type: Hash
+          end
+          put ":id" do
+            config = current_tenant.tenant_integration_configurations.find(params[:id])
+            result = Integrations::TenantConfigurations::UpdateService.new(
+              config,
+              declared(params, include_missing: false)
+            ).call
 
-      def find_credential!
-        credential = current_company.telemetry_credentials.find(params[:credential_id])
-        error!("Credential not active", 422) unless credential.is_active?
-        credential
-      end
-    end
+            if result.success?
+              present result.data,
+                      with: Entities::TenantIntegrationConfigurationEntity,
+                      include_computed: true
+            else
+              error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
+            end
+          end
 
-    resource :companies do
-      route_param :company_id do
-        resource :telemetry_credentials do
-          route_param :credential_id do
-            namespace :sync do
-              desc "Sync refuels (fuel fill-ups)",
-                   tags: [ "Telemetry Sync" ]
-              params do
-                optional :from_date, type: DateTime, desc: "Start date for sync"
-                optional :to_date, type: DateTime, desc: "End date for sync"
-                optional :vehicle_id, type: Integer, desc: "Sync specific vehicle only"
-              end
-              post :refuels do
-                authorize_company!
-                credential = find_credential!
+          # ================================================================
+          # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:id
+          # Eliminar configuración
+          # ================================================================
+          desc "Eliminar configuración de integración"
+          params do
+            requires :id, type: Integer
+          end
+          delete ":id" do
+            config = current_tenant.tenant_integration_configurations.find(params[:id])
+            result = Integrations::TenantConfigurations::DestroyService.new(config).call
 
-                sync_service = Telemetry::SyncService.new(credential)
-                result = sync_service.sync_refuels(
-                  vehicle_id: params[:vehicle_id],
-                  from_date: params[:from_date],
-                  to_date: params[:to_date]
-                )
+            if result.success?
+              { success: true, message: result.message }
+            else
+              error!({ error: "deletion_error", message: result.errors.join(", ") }, 422)
+            end
+          end
 
-                {
-                  success: result[:success],
-                  sync_log_id: result[:sync_log_id],
-                  stats: result[:stats],
-                  error: result[:error]
-                }
-              end
+          # ================================================================
+          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/activate
+          # Activar configuración
+          # ================================================================
+          desc "Activar configuración"
+          params do
+            requires :id, type: Integer
+          end
+          post ":id/activate" do
+            config = current_tenant.tenant_integration_configurations.find(params[:id])
+            result = Integrations::TenantConfigurations::ActivateService.new(config).call
 
-              desc "Sync electric charges",
-                   tags: [ "Telemetry Sync" ]
-              params do
-                optional :from_date, type: DateTime, desc: "Start date for sync"
-                optional :to_date, type: DateTime, desc: "End date for sync"
-                optional :vehicle_id, type: Integer, desc: "Sync specific vehicle only"
-              end
-              post :charges do
-                authorize_company!
-                credential = find_credential!
+            if result.success?
+              present result.data,
+                      with: Entities::TenantIntegrationConfigurationEntity,
+                      include_computed: true
+            else
+              error!({ error: "activation_error", message: result.errors.join(", ") }, 422)
+            end
+          end
 
-                sync_service = Telemetry::SyncService.new(credential)
-                result = sync_service.sync_charges(
-                  vehicle_id: params[:vehicle_id],
-                  from_date: params[:from_date],
-                  to_date: params[:to_date]
-                )
+          # ================================================================
+          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/deactivate
+          # Desactivar configuración
+          # ================================================================
+          desc "Desactivar configuración"
+          params do
+            requires :id, type: Integer
+          end
+          post ":id/deactivate" do
+            config = current_tenant.tenant_integration_configurations.find(params[:id])
+            result = Integrations::TenantConfigurations::DeactivateService.new(config).call
 
-                {
-                  success: result[:success],
-                  sync_log_id: result[:sync_log_id],
-                  stats: result[:stats],
-                  error: result[:error]
-                }
-              end
+            if result.success?
+              present result.data,
+                      with: Entities::TenantIntegrationConfigurationEntity,
+                      include_computed: true
+            else
+              error!({ error: "deactivation_error", message: result.errors.join(", ") }, 422)
+            end
+          end
 
-              desc "Sync all data types",
-                   tags: [ "Telemetry Sync" ]
-              params do
-                optional :from_date, type: DateTime, desc: "Start date for sync"
-                optional :to_date, type: DateTime, desc: "End date for sync"
-              end
-              post :all do
-                authorize_company!
-                credential = find_credential!
+          # ================================================================
+          # POST /api/v1/tenants/:tenant_id/integration_configurations/test_connection
+          # Probar conexión (sin guardar)
+          # ================================================================
+          desc "Probar conexión con el proveedor"
+          params do
+            requires :integration_provider_id, type: Integer
+            requires :credentials, type: Hash
+          end
+          post "test_connection" do
+            result = Integrations::TenantConfigurations::TestConnectionService.new(
+              params[:integration_provider_id],
+              params[:credentials]
+            ).call
 
-                sync_service = Telemetry::SyncService.new(credential)
-                results = sync_service.sync_all(
-                  from_date: params[:from_date],
-                  to_date: params[:to_date]
-                )
+            if result.success?
+              present result.data, with: Entities::ConnectionTestResultEntity
+            else
+              error!({
+                error: "connection_error",
+                message: result.errors.join(", ")
+              }, 422)
+            end
+          end
 
-                {
-                  success: true,
-                  results: results
-                }
-              end
+          # ================================================================
+          # GET /api/v1/tenants/:tenant_id/integration_configurations/stats
+          # Estadísticas de integraciones
+          # ================================================================
+          desc "Obtener estadísticas de integraciones"
+          get "stats" do
+            result = Integrations::TenantConfigurations::GetStatsService.new(
+              current_tenant
+            ).call
 
-              desc "Get sync logs",
-                   success: Entities::TelemetrySyncLogEntity,
-                   is_array: true,
-                   tags: [ "Telemetry Sync" ]
-              params do
-                optional :sync_type, type: String, desc: "Filter by sync type"
-                optional :status, type: String, desc: "Filter by status"
-                optional :page, type: Integer, default: 1
-                optional :per_page, type: Integer, default: 20
-              end
-              get :logs do
-                authorize_company!
-                credential = find_credential!
-
-                logs = credential.telemetry_sync_logs.recent
-                logs = logs.for_sync_type(params[:sync_type]) if params[:sync_type]
-                logs = logs.where(status: params[:status]) if params[:status]
-
-                logs = logs.page(params[:page]).per(params[:per_page])
-
-                present logs, with: Entities::TelemetrySyncLogEntity
-              end
-
-              desc "Get specific sync log details",
-                   success: Entities::TelemetrySyncLogEntity,
-                   tags: [ "Telemetry Sync" ]
-              params do
-                requires :log_id, type: Integer, desc: "Sync log ID"
-              end
-              get "logs/:log_id" do
-                authorize_company!
-                credential = find_credential!
-
-                log = credential.telemetry_sync_logs.find(params[:log_id])
-                present log, with: Entities::TelemetrySyncLogEntity,
-                        include_errors: true,
-                        admin_view: true
-              end
+            if result.success?
+              present result.data, with: Entities::IntegrationStatsEntity
+            else
+              error!({ error: "stats_error", message: result.errors.join(", ") }, 500)
             end
           end
         end
       end
     end
-  end
-end
-# app/api/v1/vehicle_telemetry_api.rb
-module V1
-  class VehicleTelemetryApi < Grape::API
-    version "v1", using: :path
-    format :json
-    prefix :api
 
-    helpers do
-      def current_company
-        Company.find(params[:company_id]) if params[:company_id]
-      end
+    # ====================================================================
+    # ENDPOINTS AUXILIARES (fuera del scope tenant)
+    # ====================================================================
 
-      def authorize_company!
-        error!("Company not found", 404) unless current_company
-      end
-
-      def find_vehicle!
-        vehicle = current_company.vehicles.find(params[:vehicle_id])
-        error!("Vehicle not found", 404) unless vehicle
-        vehicle
+    resource :integration_configurations do
+      # GET /api/v1/integration_configurations/sync_schedule_options
+      desc "Obtener opciones para configuración de sincronización"
+      get "sync_schedule_options" do
+        present({}, with: Entities::SyncScheduleOptionsEntity)
       end
     end
 
-    resource :companies do
-      route_param :company_id do
+    # ====================================================================
+    # MARKETPLACE - OBTENER FORMULARIO DE CREDENCIALES
+    # ====================================================================
+    resource :marketplace do
+      desc "Obtener formulario de credenciales de un proveedor"
+      params do
+        requires :slug, type: String
+      end
+      get "providers/:slug/credentials_form" do
+        result = Integrations::TenantConfigurations::GetCredentialsFormService.new(
+          params[:slug]
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::CredentialsFormEntity
+        else
+          error!({ error: "not_found", message: result.errors.join(", ") }, 404)
+        end
+      end
+
+      desc "Obtener features disponibles de un proveedor"
+      params do
+        requires :slug, type: String
+      end
+      get "providers/:slug/features" do
+        provider = IntegrationProvider.for_marketplace.find_by!(slug: params[:slug])
+        features = provider.integration_features.active.ordered
+
+        present features, with: Entities::FeatureSelectionEntity
+      end
+    end
+  end
+end
+# app/api/v1/vehicle_electric_charges.rb
+module V1
+  class VehicleElectricChargesApi < Grape::API
+    helpers do
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
+      end
+    end
+
+    resource :tenants do
+      route_param :tenant_id do
         resource :vehicles do
           route_param :vehicle_id do
-            # Configuración de telemetría del vehículo
-            namespace :telemetry_config do
-              desc "Get vehicle telemetry configuration",
-                   success: Entities::VehicleTelemetryConfigEntity,
-                   tags: [ "Vehicle Telemetry" ]
+            resource :electric_charges do
+              # ======================================================
+              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges
+              # Listar cargas de un vehículo
+              # ======================================================
+              desc "Listar cargas eléctricas de un vehículo"
+              params do
+                optional :from_date, type: Date
+                optional :to_date, type: Date
+                optional :charge_type, type: String, values: %w[AC DC]
+                optional :limit, type: Integer, default: 100
+              end
               get do
-                authorize_company!
-                vehicle = find_vehicle!
+                vehicle = current_tenant.vehicles.find(params[:vehicle_id])
 
-                config = vehicle.vehicle_telemetry_config
-                error!("No telemetry configuration found", 404) unless config
+                charges = vehicle.vehicle_electric_charges.recent
 
-                present config, with: Entities::VehicleTelemetryConfigEntity, include_credential: true
+                if params[:from_date] && params[:to_date]
+                  charges = charges.between_dates(params[:from_date], params[:to_date])
+                end
+
+                charges = charges.where(charge_type: params[:charge_type]) if params[:charge_type]
+                charges = charges.limit(params[:limit])
+
+                present charges,
+                        with: Entities::VehicleElectricChargeEntity,
+                        include_computed: true
               end
 
-              desc "Create or update vehicle telemetry configuration",
-                   success: Entities::VehicleTelemetryConfigEntity,
-                   tags: [ "Vehicle Telemetry" ]
+              # ======================================================
+              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges/:id
+              # Detalle de una carga
+              # ======================================================
+              desc "Detalle de una carga eléctrica"
               params do
-                requires :telemetry_credential_id, type: Integer, desc: "Credential ID"
-                requires :external_device_id, type: String, desc: "Device ID in provider system"
-                optional :sync_frequency, type: String, values: %w[manual hourly daily weekly], default: "daily"
-                optional :data_types, type: Array[String], default: %w[refuels charges odometer]
+                requires :id, type: Integer
+              end
+              get ":id" do
+                vehicle = current_tenant.vehicles.find(params[:vehicle_id])
+                charge = vehicle.vehicle_electric_charges.find(params[:id])
+
+                present charge,
+                        with: Entities::VehicleElectricChargeEntity,
+                        include_computed: true,
+                        include_raw_data: true
+              end
+            end
+          end
+        end
+
+        # ============================================================
+        # GET /api/v1/tenants/:tenant_id/electric_charges
+        # Listar todas las cargas del tenant
+        # ============================================================
+        resource :electric_charges do
+          desc "Listar todas las cargas eléctricas del tenant"
+          params do
+            optional :from_date, type: Date
+            optional :to_date, type: Date
+            optional :vehicle_id, type: Integer
+            optional :charge_type, type: String, values: %w[AC DC]
+            optional :limit, type: Integer, default: 100
+          end
+          get do
+            charges = VehicleElectricCharge.by_tenant(current_tenant.id).recent
+
+            if params[:from_date] && params[:to_date]
+              charges = charges.between_dates(params[:from_date], params[:to_date])
+            end
+
+            charges = charges.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+            charges = charges.where(charge_type: params[:charge_type]) if params[:charge_type]
+            charges = charges.limit(params[:limit])
+
+            present charges, with: Entities::VehicleElectricChargeSummaryEntity
+          end
+        end
+      end
+    end
+  end
+end
+# app/api/v1/vehicle_provider_mappings.rb
+module V1
+  class VehicleProviderMappingsApi < Grape::API
+    helpers do
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
+      end
+    end
+
+    resource :tenants do
+      route_param :tenant_id do
+        resource :integration_configurations do
+          route_param :config_id do
+            resource :vehicle_mappings do
+              # ============================================================
+              # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
+              # Listar mapeos de vehículos
+              # ============================================================
+              desc "Listar mapeos de vehículos para una configuración"
+              params do
+                optional :active_only, type: Boolean, default: false
+              end
+              get do
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                mappings = config.vehicle_provider_mappings
+                mappings = mappings.active if params[:active_only]
+
+                present mappings, with: Entities::VehicleProviderMappingEntity
+              end
+
+              # ============================================================
+              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
+              # Crear mapeo
+              # ============================================================
+              desc "Crear mapeo entre vehículo y proveedor"
+              params do
+                requires :vehicle_id, type: Integer
+                requires :external_vehicle_id, type: String
+                optional :external_vehicle_name, type: String
                 optional :is_active, type: Boolean, default: true
+                optional :external_metadata, type: Hash, default: {}
               end
               post do
-                authorize_company!
-                vehicle = find_vehicle!
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                vehicle = current_tenant.vehicles.find(params[:vehicle_id])
 
-                # Verificar que la credencial pertenece a la empresa
-                credential = current_company.telemetry_credentials.find(params[:telemetry_credential_id])
+                result = Integrations::VehicleMappings::CreateMappingService.new(
+                  config,
+                  vehicle,
+                  params[:external_vehicle_id],
+                  params[:external_vehicle_name]
+                ).call
 
-                config = vehicle.vehicle_telemetry_config || vehicle.build_vehicle_telemetry_config
-
-                config.assign_attributes(
-                  telemetry_credential_id: credential.id,
-                  external_device_id: params[:external_device_id],
-                  sync_frequency: params[:sync_frequency],
-                  data_types: params[:data_types],
-                  is_active: params[:is_active]
-                )
-
-                if config.save
-                  present config, with: Entities::VehicleTelemetryConfigEntity, include_credential: true
+                if result.success?
+                  present result.data, with: Entities::VehicleProviderMappingEntity
                 else
-                  error!(config.errors.full_messages, 422)
+                  error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
                 end
               end
 
-              desc "Delete vehicle telemetry configuration",
-                   tags: [ "Vehicle Telemetry" ]
-              delete do
-                authorize_company!
-                vehicle = find_vehicle!
-
-                config = vehicle.vehicle_telemetry_config
-                error!("No configuration to delete", 404) unless config
-
-                config.destroy
-                { success: true, message: "Configuration deleted" }
-              end
-            end
-
-            # Datos de repostajes
-            namespace :refuels do
-              desc "Get vehicle refuels",
-                   success: Entities::RefuelEntity,
-                   is_array: true,
-                   tags: [ "Vehicle Telemetry" ]
+              # ============================================================
+              # PUT /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
+              # Actualizar mapeo
+              # ============================================================
+              desc "Actualizar mapeo"
               params do
-                optional :from_date, type: Date, desc: "Filter from date"
-                optional :to_date, type: Date, desc: "Filter to date"
-                optional :page, type: Integer, default: 1
-                optional :per_page, type: Integer, default: 50
-                optional :include_calculations, type: Boolean, default: false
-                optional :include_anomalies, type: Boolean, default: false
+                requires :id, type: Integer
+                optional :external_vehicle_name, type: String
+                optional :external_metadata, type: Hash
               end
-              get do
-                authorize_company!
-                vehicle = find_vehicle!
+              put ":id" do
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                mapping = config.vehicle_provider_mappings.find(params[:id])
 
-                refuels = vehicle.refuels.recent
-                refuels = refuels.in_date_range(params[:from_date], params[:to_date]) if params[:from_date] && params[:to_date]
-                refuels = refuels.page(params[:page]).per(params[:per_page])
-
-                present refuels, with: Entities::RefuelEntity,
-                        include_calculations: params[:include_calculations],
-                        include_anomalies: params[:include_anomalies]
+                if mapping.update(declared(params, include_missing: false))
+                  present mapping, with: Entities::VehicleProviderMappingEntity
+                else
+                  error!({ error: "validation_error", message: mapping.errors.full_messages.join(", ") }, 422)
+                end
               end
 
-              desc "Get refuel statistics",
-                   tags: [ "Vehicle Telemetry" ]
+              # ============================================================
+              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/activate
+              # Activar mapeo
+              # ============================================================
+              desc "Activar mapeo"
               params do
-                optional :from_date, type: Date, desc: "Filter from date"
-                optional :to_date, type: Date, desc: "Filter to date"
+                requires :id, type: Integer
               end
-              get :stats do
-                authorize_company!
-                vehicle = find_vehicle!
+              post ":id/activate" do
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                mapping = config.vehicle_provider_mappings.find(params[:id])
 
-                refuels = vehicle.refuels
-                refuels = refuels.in_date_range(params[:from_date], params[:to_date]) if params[:from_date] && params[:to_date]
-
-                {
-                  total_refuels: refuels.count,
-                  total_liters: refuels.sum(:volume_liters).round(2),
-                  total_cost: refuels.sum(:cost).round(2),
-                  average_volume: refuels.average(:volume_liters)&.round(2),
-                  average_cost: refuels.average(:cost)&.round(2),
-                  anomalies_count: refuels.select { |r| r.exceeds_tank_capacity? }.count
-                }
+                mapping.activate!
+                present mapping, with: Entities::VehicleProviderMappingEntity
               end
-            end
 
-            # Datos de cargas eléctricas
-            namespace :charges do
-              desc "Get vehicle electric charges",
-                   success: Entities::ElectricChargeEntity,
-                   is_array: true,
-                   tags: [ "Vehicle Telemetry" ]
+              # ============================================================
+              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/deactivate
+              # Desactivar mapeo
+              # ============================================================
+              desc "Desactivar mapeo"
               params do
-                optional :from_date, type: Date, desc: "Filter from date"
-                optional :to_date, type: Date, desc: "Filter to date"
-                optional :charge_type, type: String, values: %w[AC DC], desc: "Filter by charge type"
-                optional :page, type: Integer, default: 1
-                optional :per_page, type: Integer, default: 50
-                optional :include_calculations, type: Boolean, default: false
-                optional :include_anomalies, type: Boolean, default: false
+                requires :id, type: Integer
               end
-              get do
-                authorize_company!
-                vehicle = find_vehicle!
+              post ":id/deactivate" do
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                mapping = config.vehicle_provider_mappings.find(params[:id])
 
-                charges = vehicle.electric_charges.recent
-                charges = charges.in_date_range(params[:from_date], params[:to_date]) if params[:from_date] && params[:to_date]
-                charges = charges.where(charge_type: params[:charge_type]) if params[:charge_type]
-                charges = charges.page(params[:page]).per(params[:per_page])
-
-                present charges, with: Entities::ElectricChargeEntity,
-                        include_calculations: params[:include_calculations],
-                        include_anomalies: params[:include_anomalies]
+                mapping.deactivate!
+                present mapping, with: Entities::VehicleProviderMappingEntity
               end
 
-              desc "Get charge statistics",
-                   tags: [ "Vehicle Telemetry" ]
+              # ============================================================
+              # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
+              # Eliminar mapeo
+              # ============================================================
+              desc "Eliminar mapeo"
               params do
-                optional :from_date, type: Date, desc: "Filter from date"
-                optional :to_date, type: Date, desc: "Filter to date"
+                requires :id, type: Integer
               end
-              get :stats do
-                authorize_company!
-                vehicle = find_vehicle!
+              delete ":id" do
+                config = current_tenant.tenant_integration_configurations.find(params[:config_id])
+                mapping = config.vehicle_provider_mappings.find(params[:id])
 
-                charges = vehicle.electric_charges
-                charges = charges.in_date_range(params[:from_date], params[:to_date]) if params[:from_date] && params[:to_date]
-
-                {
-                  total_charges: charges.count,
-                  total_kwh: charges.sum(:energy_consumed_kwh).round(3),
-                  total_duration_minutes: charges.sum(:duration_minutes),
-                  average_kwh: charges.average(:energy_consumed_kwh)&.round(3),
-                  average_duration_minutes: charges.average(:duration_minutes)&.round(2),
-                  ac_charges: charges.ac_charges.count,
-                  dc_charges: charges.dc_charges.count
-                }
+                if mapping.destroy
+                  { success: true, message: "Mapeo eliminado exitosamente" }
+                else
+                  error!({ error: "deletion_error", message: mapping.errors.full_messages.join(", ") }, 422)
+                end
               end
             end
           end
@@ -589,191 +734,234 @@ module V1
     end
   end
 end
-# app/api/v1/vehicles_api.rb
+# app/api/v1/vehicle_refuelings.rb
 module V1
-  class VehiclesApi < Grape::API
-    version "v1", using: :path
-    format :json
-    prefix :api
-
+  class VehicleRefuelingsApi < Grape::API
     helpers do
-      def current_company
-        Company.find(params[:company_id]) if params[:company_id]
-      end
-
-      def authorize_company!
-        error!("Company not found", 404) unless current_company
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
       end
     end
 
-    resource :companies do
-      route_param :company_id do
+    resource :tenants do
+      route_param :tenant_id do
         resource :vehicles do
-          desc "List company vehicles",
-               success: Entities::VehicleEntity,
-               is_array: true,
-               tags: [ "Vehicles" ]
-          params do
-            optional :active_only, type: Boolean, default: false
-            optional :fuel_type, type: String, values: %w[combustion electric hybrid]
-            optional :with_telemetry, type: Boolean, default: false
-            optional :page, type: Integer, default: 1
-            optional :per_page, type: Integer, default: 20
-            optional :include_stats, type: Boolean, default: false
-          end
-          get do
-            authorize_company!
+          route_param :vehicle_id do
+            resource :refuelings do
+              # ======================================================
+              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings
+              # Listar repostajes de un vehículo
+              # ======================================================
+              desc "Listar repostajes de un vehículo"
+              params do
+                optional :from_date, type: Date
+                optional :to_date, type: Date
+                optional :limit, type: Integer, default: 100
+              end
+              get do
+                vehicle = current_tenant.vehicles.find(params[:vehicle_id])
 
-            vehicles = current_company.vehicles
-            vehicles = vehicles.active if params[:active_only]
-            vehicles = vehicles.where(fuel_type: params[:fuel_type]) if params[:fuel_type]
-            vehicles = vehicles.with_telemetry if params[:with_telemetry]
+                refuelings = vehicle.vehicle_refuelings.recent
 
-            vehicles = vehicles.page(params[:page]).per(params[:per_page])
+                if params[:from_date] && params[:to_date]
+                  refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+                end
 
-            present vehicles, with: Entities::VehicleEntity, include_stats: params[:include_stats]
-          end
+                refuelings = refuelings.limit(params[:limit])
 
-          desc "Get vehicle details",
-               success: Entities::VehicleEntity,
-               tags: [ "Vehicles" ]
-          params do
-            requires :id, type: Integer, desc: "Vehicle ID"
-            optional :include_telemetry_config, type: Boolean, default: false
-            optional :include_stats, type: Boolean, default: false
-          end
-          route_param :id do
-            get do
-              authorize_company!
+                present refuelings,
+                        with: Entities::VehicleRefuelingEntity,
+                        include_computed: true
+              end
 
-              vehicle = current_company.vehicles.find(params[:id])
-              present vehicle, with: Entities::VehicleEntity,
-                      include_telemetry_config: params[:include_telemetry_config],
-                      include_stats: params[:include_stats]
+              # ======================================================
+              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings/:id
+              # Detalle de un repostaje
+              # ======================================================
+              desc "Detalle de un repostaje"
+              params do
+                requires :id, type: Integer
+              end
+              get ":id" do
+                vehicle = current_tenant.vehicles.find(params[:vehicle_id])
+                refueling = vehicle.vehicle_refuelings.find(params[:id])
+
+                present refueling,
+                        with: Entities::VehicleRefuelingEntity,
+                        include_computed: true,
+                        include_raw_data: true
+              end
             end
           end
+        end
 
-          desc "Create a new vehicle",
-               success: Entities::VehicleEntity,
-               tags: [ "Vehicles" ]
+        # ============================================================
+        # GET /api/v1/tenants/:tenant_id/refuelings
+        # Listar todos los repostajes del tenant
+        # ============================================================
+        resource :refuelings do
+          desc "Listar todos los repostajes del tenant"
           params do
-            requires :name, type: String, desc: "Vehicle name"
-            requires :license_plate, type: String, desc: "License plate"
-            optional :vin, type: String, desc: "VIN"
-            optional :brand, type: String, desc: "Brand"
-            optional :model, type: String, desc: "Model"
-            optional :year, type: Integer, desc: "Year"
-            optional :fuel_type, type: String, values: %w[combustion electric hybrid]
-            optional :tank_capacity_liters, type: Float, desc: "Tank capacity in liters"
-            optional :battery_capacity_kwh, type: Float, desc: "Battery capacity in kWh"
-            optional :is_active, type: Boolean, default: true
+            optional :from_date, type: Date
+            optional :to_date, type: Date
+            optional :vehicle_id, type: Integer
+            optional :fuel_type, type: String
+            optional :limit, type: Integer, default: 100
+          end
+          get do
+            refuelings = VehicleRefueling.by_tenant(current_tenant.id).recent
+
+            if params[:from_date] && params[:to_date]
+              refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+            end
+
+            refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+            refuelings = refuelings.by_fuel_type(params[:fuel_type]) if params[:fuel_type]
+            refuelings = refuelings.limit(params[:limit])
+
+            present refuelings, with: Entities::VehicleRefuelingSummaryEntity
+          end
+        end
+      end
+    end
+  end
+end
+# app/api/v1/vehicles.rb
+module V1
+  class VehiclesApi < Grape::API
+    helpers do
+      def current_tenant
+        @current_tenant ||= Tenant.find(params[:tenant_id])
+      end
+    end
+
+    resource :tenants do
+      route_param :tenant_id do
+        resource :vehicles do
+          # ================================================================
+          # GET /api/v1/tenants/:tenant_id/vehicles
+          # Listar vehículos del tenant
+          # ================================================================
+          desc "Listar vehículos del tenant"
+          params do
+            optional :status, type: String, values: Vehicle.statuses
+            optional :fuel_type, type: String, values: Vehicle.fuel_types
+            optional :vehicle_type, type: String, values: Vehicle.vehicle_types
+            optional :is_electric, type: Boolean
+            optional :with_telemetry, type: Boolean, default: false
+          end
+          get do
+            vehicles = current_tenant.vehicles
+
+            vehicles = vehicles.where(status: params[:status]) if params[:status]
+            vehicles = vehicles.by_fuel_type(params[:fuel_type]) if params[:fuel_type]
+            vehicles = vehicles.where(vehicle_type: params[:vehicle_type]) if params[:vehicle_type]
+            vehicles = vehicles.where(is_electric: params[:is_electric]) unless params[:is_electric].nil?
+
+            if params[:with_telemetry]
+              vehicles = current_tenant.vehicles_with_telemetry
+            end
+
+            vehicles = vehicles.by_name
+
+            present vehicles, with: Entities::VehicleEntity
+          end
+
+          # ================================================================
+          # GET /api/v1/tenants/:tenant_id/vehicles/:id
+          # Obtener detalle de un vehículo
+          # ================================================================
+          desc "Obtener detalle de un vehículo"
+          params do
+            requires :id, type: Integer
+          end
+          get ":id" do
+            vehicle = current_tenant.vehicles.find(params[:id])
+            present vehicle,
+                    with: Entities::VehicleEntity,
+                    include_telemetry: true,
+                    include_statistics: true
+          end
+
+          # ================================================================
+          # POST /api/v1/tenants/:tenant_id/vehicles
+          # Crear vehículo
+          # ================================================================
+          desc "Crear vehículo"
+          params do
+            requires :name, type: String
+            requires :license_plate, type: String
+            optional :vin, type: String
+            optional :brand, type: String
+            optional :model, type: String
+            optional :year, type: Integer
+            optional :vehicle_type, type: String, values: Vehicle.vehicle_types
+            optional :fuel_type, type: String, values: Vehicle.fuel_types
+            optional :tank_capacity_liters, type: Float
+            optional :battery_capacity_kwh, type: Float
+            optional :initial_odometer_km, type: Float
+            optional :acquisition_date, type: Date
+            optional :metadata, type: Hash, default: {}
           end
           post do
-            authorize_company!
-
-            vehicle = current_company.vehicles.new(
-              name: params[:name],
-              license_plate: params[:license_plate],
-              vin: params[:vin],
-              brand: params[:brand],
-              model: params[:model],
-              year: params[:year],
-              fuel_type: params[:fuel_type],
-              tank_capacity_liters: params[:tank_capacity_liters],
-              battery_capacity_kwh: params[:battery_capacity_kwh],
-              is_active: params[:is_active]
-            )
+            vehicle = current_tenant.vehicles.build(declared(params, include_missing: false))
 
             if vehicle.save
               present vehicle, with: Entities::VehicleEntity
             else
-              error!(vehicle.errors.full_messages, 422)
+              error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
 
-          desc "Update a vehicle",
-               success: Entities::VehicleEntity,
-               tags: [ "Vehicles" ]
+          # ================================================================
+          # PUT /api/v1/tenants/:tenant_id/vehicles/:id
+          # Actualizar vehículo
+          # ================================================================
+          desc "Actualizar vehículo"
           params do
-            requires :id, type: Integer, desc: "Vehicle ID"
+            requires :id, type: Integer
             optional :name, type: String
             optional :license_plate, type: String
             optional :vin, type: String
             optional :brand, type: String
             optional :model, type: String
             optional :year, type: Integer
-            optional :fuel_type, type: String, values: %w[combustion electric hybrid]
+            optional :vehicle_type, type: String
+            optional :fuel_type, type: String
+            optional :status, type: String, values: Vehicle.statuses
             optional :tank_capacity_liters, type: Float
             optional :battery_capacity_kwh, type: Float
-            optional :is_active, type: Boolean
+            optional :current_odometer_km, type: Float
+            optional :last_maintenance_date, type: Date
+            optional :next_maintenance_date, type: Date
+            optional :metadata, type: Hash
           end
-          route_param :id do
-            put do
-              authorize_company!
+          put ":id" do
+            vehicle = current_tenant.vehicles.find(params[:id])
 
-              vehicle = current_company.vehicles.find(params[:id])
-
-              update_params = declared(params, include_missing: false).except(:id, :company_id)
-
-              if vehicle.update(update_params)
-                present vehicle, with: Entities::VehicleEntity
-              else
-                error!(vehicle.errors.full_messages, 422)
-              end
+            if vehicle.update(declared(params, include_missing: false))
+              present vehicle, with: Entities::VehicleEntity
+            else
+              error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
 
-          desc "Delete a vehicle",
-               tags: [ "Vehicles" ]
+          # ================================================================
+          # DELETE /api/v1/tenants/:tenant_id/vehicles/:id
+          # Eliminar vehículo
+          # ================================================================
+          desc "Eliminar vehículo"
           params do
-            requires :id, type: Integer, desc: "Vehicle ID"
+            requires :id, type: Integer
           end
-          route_param :id do
-            delete do
-              authorize_company!
+          delete ":id" do
+            vehicle = current_tenant.vehicles.find(params[:id])
 
-              vehicle = current_company.vehicles.find(params[:id])
-
-              if vehicle.destroy
-                { success: true, message: "Vehicle deleted successfully" }
-              else
-                error!(vehicle.errors.full_messages, 422)
-              end
+            if vehicle.destroy
+              { success: true, message: "Vehículo eliminado exitosamente" }
+            else
+              error!({ error: "deletion_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
-          end
-
-          desc "Get vehicles without telemetry configuration",
-               success: Entities::VehicleEntity,
-               is_array: true,
-               tags: [ "Vehicles" ]
-          params do
-            optional :page, type: Integer, default: 1
-            optional :per_page, type: Integer, default: 20
-          end
-          get :without_telemetry do
-            authorize_company!
-
-            vehicles = current_company.vehicles_without_telemetry
-            vehicles = vehicles.page(params[:page]).per(params[:per_page])
-
-            present vehicles, with: Entities::VehicleEntity
-          end
-
-          desc "Get vehicles with active telemetry",
-               success: Entities::VehicleEntity,
-               is_array: true,
-               tags: [ "Vehicles" ]
-          params do
-            optional :page, type: Integer, default: 1
-            optional :per_page, type: Integer, default: 20
-          end
-          get :with_telemetry do
-            authorize_company!
-
-            vehicles = current_company.vehicles_with_telemetry
-            vehicles = vehicles.page(params[:page]).per(params[:per_page])
-
-            present vehicles, with: Entities::VehicleEntity, include_telemetry_config: true
           end
         end
       end

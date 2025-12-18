@@ -13,12 +13,9 @@ module Entities
     expose :records_failed
     expose :error_message
     expose :created_at
-
-    # Información de la configuración
     expose :provider_name, if: { include_provider: true } do |log, _options|
       log.tenant_integration_configuration.integration_provider.name
     end
-
     expose :status_badge do |log, _options|
       case log.status
       when "success" then "success"

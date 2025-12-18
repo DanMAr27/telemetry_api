@@ -10,11 +10,8 @@ module Entities
     expose :is_active
     expose :created_at
     expose :updated_at
-
     # Relación opcional
     expose :integration_provider, using: Entities::IntegrationProviderEntity, if: { include_provider: true }
-
-    # Campo computado
     expose :available, if: { include_computed: true } do |feature, _options|
       feature.available?
     end
