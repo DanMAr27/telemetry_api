@@ -17,26 +17,21 @@ class Vehicle < ApplicationRecord
   validates :vin, length: { is: 17 }, allow_blank: true,
                   uniqueness: true,
                   format: { with: /\A[A-HJ-NPR-Z0-9]{17}\z/, message: "formato VIN inválido" }
-
   validates :status, presence: true,
                      inclusion: { in: %w[active maintenance inactive sold] }
-
   validates :fuel_type, inclusion: {
     in: %w[diesel gasoline electric hybrid lpg cng hydrogen],
     message: "%{value} no es un tipo de combustible válido"
   }, allow_blank: true
-
   validates :vehicle_type, inclusion: {
     in: %w[car van truck motorcycle bus],
     message: "%{value} no es un tipo de vehículo válido"
   }, allow_blank: true
-
   validates :year, numericality: {
     only_integer: true,
     greater_than_or_equal_to: 1900,
     less_than_or_equal_to: -> { Date.current.year + 1 }
   }, allow_nil: true
-
   validates :tank_capacity_liters, numericality: { greater_than: 0 }, allow_nil: true
   validates :battery_capacity_kwh, numericality: { greater_than: 0 }, allow_nil: true
   validates :initial_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
@@ -56,10 +51,6 @@ class Vehicle < ApplicationRecord
   before_validation :normalize_license_plate
   before_validation :set_is_electric_flag
   before_save :normalize_vin
-
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
 
   # Estado
   def active?
@@ -131,10 +122,6 @@ class Vehicle < ApplicationRecord
     "#{name} (#{license_plate})"
   end
 
-  # ============================================================================
-  # CLASS METHODS
-  # ============================================================================
-
   def self.fuel_types
     %w[diesel gasoline electric hybrid lpg cng hydrogen]
   end
@@ -148,10 +135,6 @@ class Vehicle < ApplicationRecord
   end
 
   private
-
-  # ============================================================================
-  # CALLBACKS PRIVADOS
-  # ============================================================================
 
   def normalize_license_plate
     self.license_plate = license_plate&.upcase&.strip

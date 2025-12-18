@@ -39,7 +39,8 @@ module V1
 
 
     mount V1::MarketplaceApi
-    mount V1::TenantIntegrationConfigurationsApi
+    mount V1::TenantsApi
+    mount V1::IntegrationConfigurationsApi
     mount V1::VehiclesApi
     mount V1::VehicleProviderMappingsApi
     mount V1::SyncExecutionsApi

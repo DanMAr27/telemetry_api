@@ -5,48 +5,31 @@ class TenantIntegrationConfiguration < ApplicationRecord
 
   belongs_to :tenant
   belongs_to :integration_provider
-
   has_many :vehicle_provider_mappings, dependent: :destroy
   has_many :vehicles, through: :vehicle_provider_mappings
   has_many :integration_sync_executions, dependent: :destroy
-  has_many :integration_raw_data,
-           class_name: "IntegrationRawData",
-           dependent: :destroy
+  has_many :integration_raw_data, class_name: "IntegrationRawData", dependent: :destroy
 
   delegate :name, :slug, :logo_url, :api_base_url, to: :integration_provider, prefix: true
   delegate :integration_features, :integration_auth_schema, to: :integration_provider
 
+  # Validación básica: Un tenant solo puede tener UNA configuración por proveedor
   validates :tenant_id, uniqueness: {
     scope: :integration_provider_id,
     message: "ya tiene una configuración para este proveedor"
   }
-  validates :sync_frequency, presence: true,
-                             inclusion: { in: %w[daily weekly monthly] }
-  validates :sync_hour, presence: true,
-                        numericality: {
-                          only_integer: true,
-                          greater_than_or_equal_to: 0,
-                          less_than_or_equal_to: 23
-                        }
-  validates :sync_day_of_week,
-            numericality: {
-              only_integer: true,
-              greater_than_or_equal_to: 0,
-              less_than_or_equal_to: 6
-            },
-            if: -> { sync_frequency == "weekly" }
-  validates :sync_day_of_week,
-            absence: { message: "debe estar vacío para frecuencia diaria o mensual" },
-            unless: -> { sync_frequency == "weekly" }
-  validates :sync_day_of_month,
-            inclusion: { in: %w[start end] },
-            if: -> { sync_frequency == "monthly" }
-
-  validates :sync_day_of_month,
-            absence: { message: "debe estar vacío para frecuencia diaria o semanal" },
-            unless: -> { sync_frequency == "monthly" }
+  # Validar que enabled_features sea un array
+  validates :enabled_features, presence: true
+  validate :validate_enabled_features_structure
+  # Validar credenciales según el schema del proveedor
   validate :validate_credentials_structure, if: -> { credentials.present? }
-  validate :validate_enabled_features, if: -> { enabled_features.present? }
+  # Programación: validaciones básicas
+  validates :sync_frequency, presence: true, inclusion: { in: %w[daily weekly monthly] }
+  validates :sync_hour, presence: true, numericality: {
+    only_integer: true,
+    greater_than_or_equal_to: 0,
+    less_than_or_equal_to: 23
+  }
 
   scope :active, -> { where(is_active: true) }
   scope :inactive, -> { where(is_active: false) }
@@ -55,13 +38,11 @@ class TenantIntegrationConfiguration < ApplicationRecord
   }
   scope :with_errors, -> { where(last_sync_status: "error") }
   scope :successful, -> { where(last_sync_status: "success") }
-  scope :ready_for_sync, -> {
-    active.where("last_sync_at IS NULL OR last_sync_at < ?", 1.hour.ago)
-  }
 
   before_save :set_activated_at, if: -> { is_active_changed? && is_active? }
 
   def activate!
+    return false unless can_be_activated?
     update!(is_active: true)
   end
 
@@ -71,6 +52,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
 
   def active?
     is_active
+  end
+
+  def can_be_activated?
+    # Verificaciones para poder activar
+    return false unless credentials.present?
+    return false unless enabled_features.any?
+    true
   end
 
   def has_error?
@@ -89,35 +77,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
     integration_provider.integration_features.active.where(feature_key: enabled_features)
   end
 
-  def calculate_next_sync_at
-    base_time = Time.current.change(hour: sync_hour, min: 0, sec: 0)
-
-    case sync_frequency
-    when "daily"
-      base_time > Time.current ? base_time : base_time + 1.day
-
-    when "weekly"
-      days_until_target = (sync_day_of_week - base_time.wday) % 7
-      days_until_target = 7 if days_until_target.zero? && base_time < Time.current
-      base_time + days_until_target.days
-
-    when "monthly"
-      if sync_day_of_month == "start"
-        target = base_time.beginning_of_month.change(hour: sync_hour)
-        target > Time.current ? target : (target + 1.month).beginning_of_month.change(hour: sync_hour)
-      else # 'end'
-        target = base_time.end_of_month.beginning_of_day.change(hour: sync_hour)
-        target > Time.current ? target : (base_time + 1.month).end_of_month.beginning_of_day.change(hour: sync_hour)
-      end
-    end
-  end
-
+  # Descripción de programación para mostrar en UI
   def sync_schedule_description
     case sync_frequency
     when "daily"
       "Todos los días a las #{format_hour(sync_hour)}"
     when "weekly"
-      day_name = I18n.t("date.day_names")[sync_day_of_week]
+      day_name = %w[Domingo Lunes Martes Miércoles Jueves Viernes Sábado][sync_day_of_week || 0]
       "Todos los #{day_name} a las #{format_hour(sync_hour)}"
     when "monthly"
       day_desc = sync_day_of_month == "start" ? "el primer día del mes" : "el último día del mes"
@@ -125,6 +91,7 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 
+  # Marcar última sync como exitosa
   def mark_sync_success!(timestamp = Time.current)
     update!(
       last_sync_at: timestamp,
@@ -133,6 +100,7 @@ class TenantIntegrationConfiguration < ApplicationRecord
     )
   end
 
+  # Marcar última sync con error
   def mark_sync_error!(error_message)
     update!(
       last_sync_at: Time.current,
@@ -141,14 +109,14 @@ class TenantIntegrationConfiguration < ApplicationRecord
     )
   end
 
-  # Método auxiliar para obtener vehículos mapeados activos
+  # Vehículos mapeados activos
   def mapped_vehicles
     vehicles.joins(:vehicle_provider_mappings)
             .where(vehicle_provider_mappings: { is_active: true })
             .distinct
   end
 
-  # Método para verificar si un vehículo está mapeado
+  # Verificar si un vehículo está mapeado
   def vehicle_mapped?(vehicle)
     vehicle_provider_mappings.active.exists?(vehicle: vehicle)
   end
@@ -158,17 +126,17 @@ class TenantIntegrationConfiguration < ApplicationRecord
     vehicle_provider_mappings.active.find_by(vehicle: vehicle)
   end
 
-  # Método auxiliar para obtener última ejecución
+  # Última ejecución de sync
   def last_sync_execution
     integration_sync_executions.recent.first
   end
 
-  # Método auxiliar para obtener ejecuciones por feature
+  # Ejecuciones por feature
   def sync_executions_for(feature_key)
     integration_sync_executions.by_feature(feature_key).recent
   end
 
-  # Estadísticas de sincronización
+  # Estadísticas
   def sync_statistics
     {
       total_executions: integration_sync_executions.count,
@@ -208,12 +176,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 
-  def validate_enabled_features
+  def validate_enabled_features_structure
     unless enabled_features.is_a?(Array)
       errors.add(:enabled_features, "debe ser un array")
       return
     end
 
+    # Validar que las features existan y estén activas
     available_feature_keys = integration_provider.integration_features.active.pluck(:feature_key)
     invalid_features = enabled_features - available_feature_keys
 

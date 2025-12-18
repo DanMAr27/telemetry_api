@@ -2,6 +2,7 @@
 module Entities
   class TenantIntegrationConfigurationSummaryEntity < Grape::Entity
     expose :id
+    expose :tenant_id
     expose :is_active
     expose :activated_at
     expose :sync_frequency
@@ -9,6 +10,14 @@ module Entities
     expose :last_sync_at
     expose :last_sync_status
     expose :created_at
+    expose :tenant do |config, _options|
+      {
+        id: config.tenant.id,
+        name: config.tenant.name,
+        slug: config.tenant.slug,
+        status: config.tenant.status
+      }
+    end
     expose :provider do |config, _options|
       {
         id: config.integration_provider.id,

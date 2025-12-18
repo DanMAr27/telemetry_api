@@ -23,11 +23,6 @@ module Integrations
       end
 
       protected
-
-      # ========================================================================
-      # MÉTODOS HTTP AUXILIARES
-      # ========================================================================
-
       # Realizar petición POST
       def http_post(url, body, headers = {})
         uri = URI.parse(url)
@@ -93,10 +88,6 @@ module Integrations
         raise ApiError, "Respuesta no es JSON válido: #{e.message}"
       end
 
-      # ========================================================================
-      # LOGGING
-      # ========================================================================
-
       def log_request(url, body)
         Rails.logger.debug("→ #{self.class.name} POST #{url}")
         Rails.logger.debug("  Body: #{body.to_json[0..200]}...") if body
@@ -106,10 +97,6 @@ module Integrations
         Rails.logger.debug("← Response: #{response.code}")
         Rails.logger.debug("  Body: #{response.body[0..200]}...")
       end
-
-      # ========================================================================
-      # EXCEPCIONES PERSONALIZADAS
-      # ========================================================================
 
       class ApiError < StandardError; end
       class AuthenticationError < ApiError; end

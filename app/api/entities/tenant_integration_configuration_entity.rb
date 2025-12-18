@@ -4,8 +4,6 @@ module Entities
     expose :id
     expose :tenant_id
     expose :integration_provider_id
-    # NO exponemos credentials por seguridad
-    # expose :encrypted_credentials # NUNCA exponer
     expose :is_active
     expose :activated_at
     expose :sync_frequency
@@ -20,7 +18,7 @@ module Entities
     expose :metadata
     expose :created_at
     expose :updated_at
-    expose :tenant, using: Entities::TenantEntity, if: { include_tenant: true }
+    expose :tenant, using: Entities::TenantSummaryEntity, if: { include_tenant: true }
     expose :integration_provider,
            using: Entities::IntegrationProviderEntity,
            if: { include_provider: true }
@@ -30,6 +28,14 @@ module Entities
         name: config.integration_provider.name,
         slug: config.integration_provider.slug,
         logo_url: config.integration_provider.logo_url
+      }
+    end
+    expose :tenant_info, unless: { include_tenant: true } do |config, _options|
+      {
+        id: config.tenant.id,
+        name: config.tenant.name,
+        slug: config.tenant.slug,
+        status: config.tenant.status
       }
     end
     expose :has_credentials, if: { include_computed: true } do |config, _options|
@@ -65,6 +71,13 @@ module Entities
           required: field["required"],
           placeholder: field["placeholder"]
         }
+      end
+    end
+    expose :status_badge do |config, _options|
+      if config.is_active
+        config.has_error? ? "active_with_errors" : "active"
+      else
+        "inactive"
       end
     end
   end

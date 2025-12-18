@@ -1,99 +1,18 @@
-# app/models/integration_category.rb
-class IntegrationCategory < ApplicationRecord
-  # Associations
-  has_many :integration_providers, dependent: :destroy
-
-  # Validations
-  validates :name, presence: true, length: { maximum: 100 }
-  validates :slug, presence: true,
-                   length: { maximum: 50 },
-                   uniqueness: true,
-                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
-  validates :icon, length: { maximum: 50 }, allow_blank: true
-  validates :display_order, presence: true, numericality: { only_integer: true }
-
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :ordered, -> { order(display_order: :asc, name: :asc) }
-  scope :for_marketplace, -> { active.ordered }
-
-  # Callbacks
-  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
-
-  private
-
-  def generate_slug
-    self.slug = name.parameterize.underscore
-  end
-end
-
-# app/models/integration_provider.rb
-class IntegrationProvider < ApplicationRecord
-  # Associations
-  belongs_to :integration_category
-  has_one :integration_auth_schema, dependent: :destroy
-  has_many :integration_features, dependent: :destroy
-
-  # Validations
-  validates :name, presence: true, length: { maximum: 100 }
-  validates :slug, presence: true,
-                   length: { maximum: 50 },
-                   uniqueness: true,
-                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
-  validates :status, presence: true,
-                     inclusion: { in: %w[active coming_soon deprecated beta] }
-  validates :api_base_url, length: { maximum: 500 }, allow_blank: true
-  validates :logo_url, length: { maximum: 500 }, allow_blank: true
-  validates :website_url, length: { maximum: 500 }, allow_blank: true
-  validates :display_order, presence: true, numericality: { only_integer: true }
-
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :by_status, ->(status) { where(status: status) }
-  scope :premium, -> { where(is_premium: true) }
-  scope :free, -> { where(is_premium: false) }
-  scope :ordered, -> { order(display_order: :asc, name: :asc) }
-  scope :for_marketplace, -> { active.where(status: [ "active", "beta" ]).ordered }
-
-  # Callbacks
-  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
-
-  # Instance methods
-  def available?
-    is_active && status.in?([ "active", "beta" ])
-  end
-
-  def ready_for_production?
-    is_active && status == "active"
-  end
-
-  private
-
-  def generate_slug
-    self.slug = name.parameterize.underscore
-  end
-end
-
 # app/models/integration_auth_schema.rb
 class IntegrationAuthSchema < ApplicationRecord
-  # Associations
   belongs_to :integration_provider
 
-  # Validations
   validates :auth_fields, presence: true
   validates :integration_provider_id, uniqueness: {
     scope: :is_active,
     conditions: -> { where(is_active: true) },
     message: "ya tiene un schema de autenticación activo"
   }, if: :is_active?
-
-  # Validación personalizada para auth_fields
   validate :validate_auth_fields_structure
 
   # Scopes
   scope :active, -> { where(is_active: true) }
 
-  # Instance methods
   def field_names
     return [] unless auth_fields.is_a?(Array)
     auth_fields.map { |field| field["name"] }.compact
@@ -137,34 +56,10 @@ class IntegrationAuthSchema < ApplicationRecord
   end
 end
 
-# app/models/integration_feature.rb
-class IntegrationFeature < ApplicationRecord
-  # Associations
-  belongs_to :integration_provider
-
-  # Validations
-  validates :feature_key, presence: true,
-                          length: { maximum: 50 },
-                          format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" },
-                          uniqueness: { scope: :integration_provider_id }
-  validates :feature_name, presence: true, length: { maximum: 100 }
-  validates :display_order, presence: true, numericality: { only_integer: true }
-
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :ordered, -> { order(display_order: :asc, feature_name: :asc) }
-
-  # Instance methods
-  def available?
-    is_active
-  end
-end
 # app/models/integration_category.rb
 class IntegrationCategory < ApplicationRecord
-  # Associations
   has_many :integration_providers, dependent: :destroy
 
-  # Validations
   validates :name, presence: true, length: { maximum: 100 }
   validates :slug, presence: true,
                    length: { maximum: 50 },
@@ -173,12 +68,10 @@ class IntegrationCategory < ApplicationRecord
   validates :icon, length: { maximum: 50 }, allow_blank: true
   validates :display_order, presence: true, numericality: { only_integer: true }
 
-  # Scopes
   scope :active, -> { where(is_active: true) }
   scope :ordered, -> { order(display_order: :asc, name: :asc) }
   scope :for_marketplace, -> { active.ordered }
 
-  # Callbacks
   before_validation :generate_slug, if: -> { slug.blank? && name.present? }
 
   private
@@ -187,12 +80,11 @@ class IntegrationCategory < ApplicationRecord
     self.slug = name.parameterize.underscore
   end
 end
+
 # app/models/integration_feature.rb
 class IntegrationFeature < ApplicationRecord
-  # Associations
   belongs_to :integration_provider
 
-  # Validations
   validates :feature_key, presence: true,
                           length: { maximum: 50 },
                           format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" },
@@ -200,24 +92,21 @@ class IntegrationFeature < ApplicationRecord
   validates :feature_name, presence: true, length: { maximum: 100 }
   validates :display_order, presence: true, numericality: { only_integer: true }
 
-  # Scopes
   scope :active, -> { where(is_active: true) }
   scope :ordered, -> { order(display_order: :asc, feature_name: :asc) }
 
-  # Instance methods
   def available?
     is_active
   end
 end
+
 # app/models/integration_provider.rb
 class IntegrationProvider < ApplicationRecord
-  # Associations
   belongs_to :integration_category
   has_one :integration_auth_schema, dependent: :destroy
   has_many :integration_features, dependent: :destroy
   has_many :tenant_integration_configurations, dependent: :restrict_with_error
 
-  # Validations
   validates :name, presence: true, length: { maximum: 100 }
   validates :slug, presence: true,
                    length: { maximum: 50 },
@@ -230,7 +119,6 @@ class IntegrationProvider < ApplicationRecord
   validates :website_url, length: { maximum: 500 }, allow_blank: true
   validates :display_order, presence: true, numericality: { only_integer: true }
 
-  # Scopes
   scope :active, -> { where(is_active: true) }
   scope :by_status, ->(status) { where(status: status) }
   scope :premium, -> { where(is_premium: true) }
@@ -238,10 +126,8 @@ class IntegrationProvider < ApplicationRecord
   scope :ordered, -> { order(display_order: :asc, name: :asc) }
   scope :for_marketplace, -> { active.where(status: [ "active", "beta" ]).ordered }
 
-  # Callbacks
   before_validation :generate_slug, if: -> { slug.blank? && name.present? }
 
-  # Instance methods
   def available?
     is_active && status.in?([ "active", "beta" ])
   end
@@ -264,43 +150,29 @@ class IntegrationProvider < ApplicationRecord
     self.slug = name.parameterize.underscore
   end
 end
+
 # app/models/integration_raw_data.rb
 class IntegrationRawData < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :integration_sync_execution
   belongs_to :tenant_integration_configuration
-
-  # Asociación polimórfica al registro normalizado final
-  # normalized_record_type = 'VehicleRefueling' o 'VehicleElectricCharge'
-  # normalized_record_id = ID del registro
   belongs_to :normalized_record,
              polymorphic: true,
              optional: true
 
-  # Delegaciones
+
   delegate :tenant, :integration_provider, to: :tenant_integration_configuration
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :provider_slug, presence: true
   validates :feature_key, presence: true
   validates :external_id, presence: true
   validates :raw_data, presence: true
   validates :processing_status, presence: true,
                                 inclusion: { in: %w[pending normalized failed duplicate] }
-
-  # Validación de unicidad (también manejada por índice UNIQUE en BD)
   validates :external_id, uniqueness: {
     scope: [ :tenant_integration_configuration_id, :provider_slug, :feature_key ],
     message: "ya existe para esta configuración"
   }
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :pending, -> { where(processing_status: "pending") }
   scope :normalized, -> { where(processing_status: "normalized") }
   scope :failed, -> { where(processing_status: "failed") }
@@ -310,16 +182,6 @@ class IntegrationRawData < ApplicationRecord
   scope :by_execution, ->(execution_id) { where(integration_sync_execution_id: execution_id) }
   scope :recent, -> { order(created_at: :desc) }
 
-  # ============================================================================
-  # CALLBACKS
-  # ============================================================================
-  # No callbacks para mantener simplicidad y evitar efectos secundarios
-
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
-
-  # Estados
   def pending?
     processing_status == "pending"
   end
@@ -386,10 +248,6 @@ class IntegrationRawData < ApplicationRecord
     "#{provider_slug}/#{feature_key} - #{external_id[0..10]}..."
   end
 
-  # ============================================================================
-  # CLASS METHODS
-  # ============================================================================
-
   # Crear o marcar como duplicado
   def self.create_or_mark_duplicate(attributes)
     create!(attributes)
@@ -410,45 +268,31 @@ class IntegrationRawData < ApplicationRecord
     group(:processing_status).count
   end
 end
+
 # app/models/integration_sync_execution.rb
 class IntegrationSyncExecution < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :tenant_integration_configuration
-  has_many :integration_raw_data, dependent: :destroy
+  has_many :integration_raw_data,
+           class_name: "IntegrationRawData",
+           dependent: :destroy
 
-  # Delegaciones para acceso rápido
   delegate :tenant, :integration_provider, to: :tenant_integration_configuration
   delegate :name, to: :integration_provider, prefix: true
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :feature_key, presence: true,
                           inclusion: {
                             in: %w[fuel battery trips real_time_location odometer diagnostics],
                             message: "%{value} no es una feature válida"
                           }
-
   validates :trigger_type, presence: true,
                            inclusion: { in: %w[manual scheduled test] }
-
   validates :status, presence: true,
                      inclusion: { in: %w[running completed failed] }
-
   validates :started_at, presence: true
-
-  # Validaciones condicionales
   validates :finished_at, presence: true, if: -> { completed? || failed? }
   validates :duration_seconds, presence: true, if: -> { finished_at.present? }
-
-  # Validaciones de integridad de estadísticas
   validate :validate_statistics_integrity, if: -> { completed? }
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :running, -> { where(status: "running") }
   scope :completed, -> { where(status: "completed") }
   scope :failed, -> { where(status: "failed") }
@@ -460,16 +304,8 @@ class IntegrationSyncExecution < ApplicationRecord
   scope :today, -> { where("started_at >= ?", Time.current.beginning_of_day) }
   scope :this_week, -> { where("started_at >= ?", Time.current.beginning_of_week) }
 
-  # ============================================================================
-  # CALLBACKS
-  # ============================================================================
   before_create :set_started_at
 
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
-
-  # Estado
   def running?
     status == "running"
   end
@@ -586,67 +422,40 @@ class IntegrationSyncExecution < ApplicationRecord
     end
   end
 end
+
 # app/models/tenant_integration_configuration.rb
 class TenantIntegrationConfiguration < ApplicationRecord
   # Encriptación de credenciales
   encrypts :credentials
 
-  # Associations
   belongs_to :tenant
   belongs_to :integration_provider
-
   has_many :vehicle_provider_mappings, dependent: :destroy
   has_many :vehicles, through: :vehicle_provider_mappings
+  has_many :integration_sync_executions, dependent: :destroy
+  has_many :integration_raw_data, class_name: "IntegrationRawData", dependent: :destroy
 
-  # Delegaciones
   delegate :name, :slug, :logo_url, :api_base_url, to: :integration_provider, prefix: true
   delegate :integration_features, :integration_auth_schema, to: :integration_provider
 
-  # Validations
+  # Validación básica: Un tenant solo puede tener UNA configuración por proveedor
   validates :tenant_id, uniqueness: {
     scope: :integration_provider_id,
     message: "ya tiene una configuración para este proveedor"
   }
-
-  validates :sync_frequency, presence: true,
-                             inclusion: { in: %w[daily weekly monthly] }
-
-  validates :sync_hour, presence: true,
-                        numericality: {
-                          only_integer: true,
-                          greater_than_or_equal_to: 0,
-                          less_than_or_equal_to: 23
-                        }
-
-  # Validaciones condicionales para weekly
-  validates :sync_day_of_week,
-            numericality: {
-              only_integer: true,
-              greater_than_or_equal_to: 0,
-              less_than_or_equal_to: 6
-            },
-            if: -> { sync_frequency == "weekly" }
-
-  validates :sync_day_of_week,
-            absence: { message: "debe estar vacío para frecuencia diaria o mensual" },
-            unless: -> { sync_frequency == "weekly" }
-
-  # Validaciones condicionales para monthly
-  validates :sync_day_of_month,
-            inclusion: { in: %w[start end] },
-            if: -> { sync_frequency == "monthly" }
-
-  validates :sync_day_of_month,
-            absence: { message: "debe estar vacío para frecuencia diaria o semanal" },
-            unless: -> { sync_frequency == "monthly" }
-
-  # Validación personalizada de credenciales
+  # Validar que enabled_features sea un array
+  validates :enabled_features, presence: true
+  validate :validate_enabled_features_structure
+  # Validar credenciales según el schema del proveedor
   validate :validate_credentials_structure, if: -> { credentials.present? }
+  # Programación: validaciones básicas
+  validates :sync_frequency, presence: true, inclusion: { in: %w[daily weekly monthly] }
+  validates :sync_hour, presence: true, numericality: {
+    only_integer: true,
+    greater_than_or_equal_to: 0,
+    less_than_or_equal_to: 23
+  }
 
-  # Validación de features
-  validate :validate_enabled_features, if: -> { enabled_features.present? }
-
-  # Scopes
   scope :active, -> { where(is_active: true) }
   scope :inactive, -> { where(is_active: false) }
   scope :by_provider, ->(provider_slug) {
@@ -654,15 +463,11 @@ class TenantIntegrationConfiguration < ApplicationRecord
   }
   scope :with_errors, -> { where(last_sync_status: "error") }
   scope :successful, -> { where(last_sync_status: "success") }
-  scope :ready_for_sync, -> {
-    active.where("last_sync_at IS NULL OR last_sync_at < ?", 1.hour.ago)
-  }
 
-  # Callbacks
   before_save :set_activated_at, if: -> { is_active_changed? && is_active? }
 
-  # Instance methods
   def activate!
+    return false unless can_be_activated?
     update!(is_active: true)
   end
 
@@ -672,6 +477,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
 
   def active?
     is_active
+  end
+
+  def can_be_activated?
+    # Verificaciones para poder activar
+    return false unless credentials.present?
+    return false unless enabled_features.any?
+    true
   end
 
   def has_error?
@@ -690,35 +502,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
     integration_provider.integration_features.active.where(feature_key: enabled_features)
   end
 
-  def calculate_next_sync_at
-    base_time = Time.current.change(hour: sync_hour, min: 0, sec: 0)
-
-    case sync_frequency
-    when "daily"
-      base_time > Time.current ? base_time : base_time + 1.day
-
-    when "weekly"
-      days_until_target = (sync_day_of_week - base_time.wday) % 7
-      days_until_target = 7 if days_until_target.zero? && base_time < Time.current
-      base_time + days_until_target.days
-
-    when "monthly"
-      if sync_day_of_month == "start"
-        target = base_time.beginning_of_month.change(hour: sync_hour)
-        target > Time.current ? target : (target + 1.month).beginning_of_month.change(hour: sync_hour)
-      else # 'end'
-        target = base_time.end_of_month.beginning_of_day.change(hour: sync_hour)
-        target > Time.current ? target : (base_time + 1.month).end_of_month.beginning_of_day.change(hour: sync_hour)
-      end
-    end
-  end
-
+  # Descripción de programación para mostrar en UI
   def sync_schedule_description
     case sync_frequency
     when "daily"
       "Todos los días a las #{format_hour(sync_hour)}"
     when "weekly"
-      day_name = I18n.t("date.day_names")[sync_day_of_week]
+      day_name = %w[Domingo Lunes Martes Miércoles Jueves Viernes Sábado][sync_day_of_week || 0]
       "Todos los #{day_name} a las #{format_hour(sync_hour)}"
     when "monthly"
       day_desc = sync_day_of_month == "start" ? "el primer día del mes" : "el último día del mes"
@@ -726,6 +516,7 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 
+  # Marcar última sync como exitosa
   def mark_sync_success!(timestamp = Time.current)
     update!(
       last_sync_at: timestamp,
@@ -734,6 +525,7 @@ class TenantIntegrationConfiguration < ApplicationRecord
     )
   end
 
+  # Marcar última sync con error
   def mark_sync_error!(error_message)
     update!(
       last_sync_at: Time.current,
@@ -742,14 +534,14 @@ class TenantIntegrationConfiguration < ApplicationRecord
     )
   end
 
-  # Método auxiliar para obtener vehículos mapeados activos
+  # Vehículos mapeados activos
   def mapped_vehicles
     vehicles.joins(:vehicle_provider_mappings)
             .where(vehicle_provider_mappings: { is_active: true })
             .distinct
   end
 
-  # Método para verificar si un vehículo está mapeado
+  # Verificar si un vehículo está mapeado
   def vehicle_mapped?(vehicle)
     vehicle_provider_mappings.active.exists?(vehicle: vehicle)
   end
@@ -757,6 +549,28 @@ class TenantIntegrationConfiguration < ApplicationRecord
   # Obtener mapeo de un vehículo
   def mapping_for(vehicle)
     vehicle_provider_mappings.active.find_by(vehicle: vehicle)
+  end
+
+  # Última ejecución de sync
+  def last_sync_execution
+    integration_sync_executions.recent.first
+  end
+
+  # Ejecuciones por feature
+  def sync_executions_for(feature_key)
+    integration_sync_executions.by_feature(feature_key).recent
+  end
+
+  # Estadísticas
+  def sync_statistics
+    {
+      total_executions: integration_sync_executions.count,
+      completed: integration_sync_executions.completed.count,
+      failed: integration_sync_executions.failed.count,
+      total_raw_records: integration_raw_data.count,
+      pending_records: integration_raw_data.pending.count,
+      failed_records: integration_raw_data.failed.count
+    }
   end
 
   private
@@ -787,12 +601,13 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 
-  def validate_enabled_features
+  def validate_enabled_features_structure
     unless enabled_features.is_a?(Array)
       errors.add(:enabled_features, "debe ser un array")
       return
     end
 
+    # Validar que las features existan y estén activas
     available_feature_keys = integration_provider.integration_features.active.pluck(:feature_key)
     invalid_features = enabled_features - available_feature_keys
 
@@ -801,12 +616,16 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 end
+
 # app/models/tenant.rb
 class Tenant < ApplicationRecord
   # Associations
   has_many :tenant_integration_configurations, dependent: :destroy
   has_many :integration_providers, through: :tenant_integration_configurations
   has_many :vehicles, dependent: :destroy
+  has_many :vehicle_refuelings, through: :vehicles
+  has_many :vehicle_electric_charges, through: :vehicles
+
   # Validations
   validates :name, presence: true, length: { maximum: 255 }
   validates :slug, presence: true,
@@ -821,11 +640,23 @@ class Tenant < ApplicationRecord
   scope :active, -> { where(status: "active") }
   scope :suspended, -> { where(status: "suspended") }
   scope :trial, -> { where(status: "trial") }
+  scope :recent, -> { order(created_at: :desc) }
+  scope :by_name, -> { order(:name) }
+  scope :with_integrations, -> { joins(:tenant_integration_configurations).distinct }
+  scope :without_activity, ->(days = 30) {
+    left_joins(:tenant_integration_configurations)
+      .where("tenant_integration_configurations.last_sync_at < ? OR tenant_integration_configurations.last_sync_at IS NULL",
+             days.days.ago)
+      .distinct
+  }
 
   # Callbacks
   before_validation :generate_slug, if: -> { slug.blank? && name.present? }
+  before_validation :normalize_email
 
   # Instance methods
+
+  # Estados
   def active?
     status == "active"
   end
@@ -838,6 +669,7 @@ class Tenant < ApplicationRecord
     status == "trial"
   end
 
+  # Integraciones
   def active_integrations
     tenant_integration_configurations.active
   end
@@ -852,41 +684,148 @@ class Tenant < ApplicationRecord
       .find_by(integration_providers: { slug: provider_slug })
   end
 
-  # Método auxiliar para obtener vehículos activos
+  # Vehículos
   def active_vehicles
     vehicles.active
   end
 
-  # Método para obtener vehículos con telemetría
   def vehicles_with_telemetry
     vehicles.joins(:vehicle_provider_mappings)
             .where(vehicle_provider_mappings: { is_active: true })
             .distinct
   end
 
+  # Verificación de datos asociados
+  def has_associated_data?
+    vehicles.any? ||
+    tenant_integration_configurations.any? ||
+    vehicle_refuelings.any? ||
+    vehicle_electric_charges.any?
+  end
+
+  def associated_data_summary
+    {
+      vehicles: vehicles.count,
+      integrations: tenant_integration_configurations.count,
+      refuelings: VehicleRefueling.by_tenant(id).count,
+      charges: VehicleElectricCharge.by_tenant(id).count,
+      total_records: vehicles.count +
+                    tenant_integration_configurations.count +
+                    VehicleRefueling.by_tenant(id).count +
+                    VehicleElectricCharge.by_tenant(id).count
+    }
+  end
+
+  # Actividad
+  def last_activity_date
+    [
+      tenant_integration_configurations.maximum(:last_sync_at),
+      vehicles.maximum(:updated_at),
+      VehicleRefueling.by_tenant(id).maximum(:refueling_date),
+      VehicleElectricCharge.by_tenant(id).maximum(:charge_start_time)
+    ].compact.max
+  end
+
+  def days_since_last_activity
+    return nil unless last_activity_date
+    ((Time.current - last_activity_date) / 1.day).to_i
+  end
+
+  def inactive_days?(threshold = 30)
+    days = days_since_last_activity
+    days.present? && days > threshold
+  end
+
+  # Estadísticas
+  def statistics(from_date = nil, to_date = nil)
+    from_date ||= 30.days.ago
+    to_date ||= Time.current
+
+    {
+      vehicles: {
+        total: vehicles.count,
+        active: vehicles.active.count,
+        with_telemetry: vehicles_with_telemetry.count
+      },
+      integrations: {
+        total: tenant_integration_configurations.count,
+        active: active_integrations.count,
+        with_errors: tenant_integration_configurations.with_errors.count
+      },
+      refuelings: {
+        total: VehicleRefueling.by_tenant(id)
+          .between_dates(from_date, to_date).count,
+        total_liters: VehicleRefueling.by_tenant(id)
+          .between_dates(from_date, to_date)
+          .sum(:volume_liters).to_f.round(2),
+        total_cost: VehicleRefueling.by_tenant(id)
+          .between_dates(from_date, to_date)
+          .sum(:cost).to_f.round(2)
+      },
+      charges: {
+        total: VehicleElectricCharge.by_tenant(id)
+          .between_dates(from_date, to_date).count,
+        total_kwh: VehicleElectricCharge.by_tenant(id)
+          .between_dates(from_date, to_date)
+          .sum(:energy_consumed_kwh).to_f.round(2)
+      }
+    }
+  end
+
+  # Operaciones de estado
+  def activate!
+    update!(status: "active")
+  end
+
+  def suspend!
+    transaction do
+      update!(status: "suspended")
+      # Desactivar todas las integraciones
+      tenant_integration_configurations.active.update_all(is_active: false)
+    end
+  end
+
+  def move_to_trial!
+    update!(status: "trial")
+  end
+
+  # Descripción
+  def display_name
+    "#{name} (#{status.humanize})"
+  end
+
   private
 
   def generate_slug
-    self.slug = name.parameterize
+    base_slug = name.parameterize
+    self.slug = base_slug
+    counter = 1
+
+    while Tenant.exists?(slug: self.slug)
+      self.slug = "#{base_slug}-#{counter}"
+      counter += 1
+    end
+  end
+
+  def normalize_email
+    self.email = email&.strip&.downcase
   end
 end
+
+
 # app/models/vehicle_electric_charge.rb
 class VehicleElectricCharge < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :tenant
   belongs_to :vehicle
-  belongs_to :integration_raw_data, optional: true
+  belongs_to :integration_raw_data,
+             class_name: "IntegrationRawData",
+             optional: true
 
   # Asociación inversa polimórfica
   has_one :raw_data_source,
           as: :normalized_record,
           class_name: "IntegrationRawData"
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :charge_start_time, presence: true
   validates :charge_type, inclusion: { in: %w[AC DC], allow_blank: true }
 
@@ -917,9 +856,6 @@ class VehicleElectricCharge < ApplicationRecord
   # Unicidad: Un raw_data solo puede generar una carga
   validates :integration_raw_data_id, uniqueness: true, allow_nil: true
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :by_tenant, ->(tenant_id) { where(tenant_id: tenant_id) }
   scope :by_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
   scope :between_dates, ->(from, to) { where(charge_start_time: from..to) }
@@ -932,11 +868,6 @@ class VehicleElectricCharge < ApplicationRecord
   scope :this_month, -> { where("charge_start_time >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("charge_start_time >= ?", Time.current.beginning_of_year) }
 
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
-
-  # Cálculos
   def soc_gained
     return nil unless start_soc_percent && end_soc_percent
     (end_soc_percent - start_soc_percent).round(2)
@@ -987,10 +918,6 @@ class VehicleElectricCharge < ApplicationRecord
     "#{energy_consumed_kwh}kWh (#{charge_type}) el #{charge_start_time.strftime('%d/%m/%Y')}"
   end
 
-  # ============================================================================
-  # CLASS METHODS
-  # ============================================================================
-
   # Estadísticas
   def self.total_energy
     sum(:energy_consumed_kwh).to_f.round(2)
@@ -1020,48 +947,8 @@ class VehicleElectricCharge < ApplicationRecord
   end
 end
 
-# ==============================================================================
-# ACTUALIZAR MODELO EXISTENTE: TenantIntegrationConfiguration
-# ==============================================================================
-# Agregar relaciones con las nuevas tablas
-
-# app/models/tenant_integration_configuration.rb
-# AGREGAR ESTAS LÍNEAS al modelo existente:
-
-class TenantIntegrationConfiguration < ApplicationRecord
-  # ... código existente ...
-
-  # AGREGAR estas relaciones:
-  has_many :integration_sync_executions, dependent: :destroy
-  has_many :integration_raw_data, dependent: :destroy
-
-  # Método auxiliar para obtener última ejecución
-  def last_sync_execution
-    integration_sync_executions.recent.first
-  end
-
-  # Método auxiliar para obtener ejecuciones por feature
-  def sync_executions_for(feature_key)
-    integration_sync_executions.by_feature(feature_key).recent
-  end
-
-  # Estadísticas de sincronización
-  def sync_statistics
-    {
-      total_executions: integration_sync_executions.count,
-      completed: integration_sync_executions.completed.count,
-      failed: integration_sync_executions.failed.count,
-      total_raw_records: integration_raw_data.count,
-      pending_records: integration_raw_data.pending.count,
-      failed_records: integration_raw_data.failed.count
-    }
-  end
-end
 # app/models/vehicle_provider_mapping.rb
 class VehicleProviderMapping < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :vehicle
   belongs_to :tenant_integration_configuration
 
@@ -1070,9 +957,6 @@ class VehicleProviderMapping < ApplicationRecord
   delegate :name, to: :vehicle, prefix: true
   delegate :license_plate, to: :vehicle, prefix: true
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :external_vehicle_id, presence: true, length: { maximum: 100 }
 
   # Un vehículo solo puede tener un mapeo activo por configuración
@@ -1081,16 +965,12 @@ class VehicleProviderMapping < ApplicationRecord
     conditions: -> { where(is_active: true) },
     message: "ya tiene un mapeo activo para esta configuración"
   }, if: :is_active?
-
   # Un external_vehicle_id solo puede estar mapeado una vez por configuración
   validates :external_vehicle_id, uniqueness: {
     scope: :tenant_integration_configuration_id,
     message: "ya está mapeado a otro vehículo en esta configuración"
   }
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :active, -> { where(is_active: true) }
   scope :inactive, -> { where(is_active: false) }
   scope :by_config, ->(config_id) { where(tenant_integration_configuration_id: config_id) }
@@ -1102,15 +982,8 @@ class VehicleProviderMapping < ApplicationRecord
   scope :by_external_id, ->(external_id) { where(external_vehicle_id: external_id) }
   scope :recent_sync, -> { order(last_sync_at: :desc) }
 
-  # ============================================================================
-  # CALLBACKS
-  # ============================================================================
   before_create :set_mapped_at
   after_save :update_vehicle_telemetry_flag, if: :saved_change_to_is_active?
-
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
 
   def activate!
     # Desactivar otros mapeos del mismo vehículo para esta configuración
@@ -1153,48 +1026,37 @@ class VehicleProviderMapping < ApplicationRecord
     # (Este flag se puede agregar al modelo Vehicle si se necesita)
   end
 end
+
 # app/models/vehicle_refueling.rb
 class VehicleRefueling < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :tenant
   belongs_to :vehicle
-  belongs_to :integration_raw_data, optional: true
+  belongs_to :integration_raw_data,
+             class_name: "IntegrationRawData",
+             optional: true
 
   # Asociación inversa polimórfica
   has_one :raw_data_source,
           as: :normalized_record,
           class_name: "IntegrationRawData"
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :refueling_date, presence: true
   validates :volume_liters, presence: true,
                             numericality: { greater_than: 0 }
-
   validates :cost, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
   validates :currency, length: { is: 3 }, allow_blank: true
-
   validates :location_lat, numericality: {
     greater_than_or_equal_to: -90,
     less_than_or_equal_to: 90
   }, allow_nil: true
-
   validates :location_lng, numericality: {
     greater_than_or_equal_to: -180,
     less_than_or_equal_to: 180
   }, allow_nil: true
-
   validates :odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
-
   # Unicidad: Un raw_data solo puede generar un refueling
   validates :integration_raw_data_id, uniqueness: true, allow_nil: true
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :by_tenant, ->(tenant_id) { where(tenant_id: tenant_id) }
   scope :by_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
   scope :between_dates, ->(from, to) { where(refueling_date: from..to) }
@@ -1206,11 +1068,6 @@ class VehicleRefueling < ApplicationRecord
   scope :this_month, -> { where("refueling_date >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("refueling_date >= ?", Time.current.beginning_of_year) }
 
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
-
-  # Cálculos
   def cost_per_liter
     return nil unless cost && volume_liters && volume_liters > 0
     (cost / volume_liters).round(2)
@@ -1243,10 +1100,6 @@ class VehicleRefueling < ApplicationRecord
     "#{volume_liters}L el #{refueling_date.strftime('%d/%m/%Y')}"
   end
 
-  # ============================================================================
-  # CLASS METHODS
-  # ============================================================================
-
   # Estadísticas
   def self.total_volume
     sum(:volume_liters).round(2)
@@ -1275,24 +1128,18 @@ class VehicleRefueling < ApplicationRecord
       )
   end
 end
+
 # app/models/vehicle.rb
 class Vehicle < ApplicationRecord
-  # ============================================================================
-  # ASSOCIATIONS
-  # ============================================================================
   belongs_to :tenant
 
-  # Mapeos con proveedores
+
   has_many :vehicle_provider_mappings, dependent: :destroy
   has_many :tenant_integration_configurations, through: :vehicle_provider_mappings
 
-  # Datos de telemetría
   has_many :vehicle_refuelings, dependent: :destroy
   has_many :vehicle_electric_charges, dependent: :destroy
 
-  # ============================================================================
-  # VALIDATIONS
-  # ============================================================================
   validates :name, presence: true, length: { maximum: 255 }
   validates :license_plate, presence: true,
                             length: { maximum: 20 },
@@ -1301,34 +1148,26 @@ class Vehicle < ApplicationRecord
   validates :vin, length: { is: 17 }, allow_blank: true,
                   uniqueness: true,
                   format: { with: /\A[A-HJ-NPR-Z0-9]{17}\z/, message: "formato VIN inválido" }
-
   validates :status, presence: true,
                      inclusion: { in: %w[active maintenance inactive sold] }
-
   validates :fuel_type, inclusion: {
     in: %w[diesel gasoline electric hybrid lpg cng hydrogen],
     message: "%{value} no es un tipo de combustible válido"
   }, allow_blank: true
-
   validates :vehicle_type, inclusion: {
     in: %w[car van truck motorcycle bus],
     message: "%{value} no es un tipo de vehículo válido"
   }, allow_blank: true
-
   validates :year, numericality: {
     only_integer: true,
     greater_than_or_equal_to: 1900,
     less_than_or_equal_to: -> { Date.current.year + 1 }
   }, allow_nil: true
-
   validates :tank_capacity_liters, numericality: { greater_than: 0 }, allow_nil: true
   validates :battery_capacity_kwh, numericality: { greater_than: 0 }, allow_nil: true
   validates :initial_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
   validates :current_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
 
-  # ============================================================================
-  # SCOPES
-  # ============================================================================
   scope :active, -> { where(status: "active") }
   scope :inactive, -> { where(status: "inactive") }
   scope :in_maintenance, -> { where(status: "maintenance") }
@@ -1340,16 +1179,9 @@ class Vehicle < ApplicationRecord
   scope :recent, -> { order(created_at: :desc) }
   scope :by_name, -> { order(:name) }
 
-  # ============================================================================
-  # CALLBACKS
-  # ============================================================================
   before_validation :normalize_license_plate
   before_validation :set_is_electric_flag
   before_save :normalize_vin
-
-  # ============================================================================
-  # INSTANCE METHODS
-  # ============================================================================
 
   # Estado
   def active?
@@ -1421,10 +1253,6 @@ class Vehicle < ApplicationRecord
     "#{name} (#{license_plate})"
   end
 
-  # ============================================================================
-  # CLASS METHODS
-  # ============================================================================
-
   def self.fuel_types
     %w[diesel gasoline electric hybrid lpg cng hydrogen]
   end
@@ -1438,10 +1266,6 @@ class Vehicle < ApplicationRecord
   end
 
   private
-
-  # ============================================================================
-  # CALLBACKS PRIVADOS
-  # ============================================================================
 
   def normalize_license_plate
     self.license_plate = license_plate&.upcase&.strip

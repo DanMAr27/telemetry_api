@@ -1,769 +1,2173 @@
-# app/services/telemetry/connectors/geotab_connector.rb
-module Telemetry
-  module Connectors
-    class GeotabConnector
-      API_BASE_URL = "https://my.geotab.com/apiv1"
+# app/services/integrations/authentication/authenticate_service.rb
+module Integrations
+  module Authentication
+    class AuthenticateService
+      # Tiempo de vida de la sesión en cache (2 horas)
+      SESSION_TTL = 2.hours
 
-      attr_reader :credentials, :session_id, :database
-
-      def initialize(credentials_hash)
-        @credentials = credentials_hash.with_indifferent_access
-        @session_id = nil
-        @database = credentials[:database]
+      def initialize(config)
+        @config = config
+        @provider = config.integration_provider
       end
 
-      # Autenticación - Devuelve el session_id
-      def authenticate!
-        response = make_request(
-          method: "Authenticate",
-          params: {
-            userName: credentials[:userName],
-            password: credentials[:password],
-            database: credentials[:database]
-          }
-        )
+      def call
+        # PASO 1: Verificar si hay sesión en cache
+        cached_session = get_cached_session
+        return ServiceResult.success(data: { session_id: cached_session }) if cached_session
 
-        raise AuthenticationError, "Authentication failed" unless response["result"]
-
-        @session_id = response.dig("result", "credentials", "sessionId")
-        @database = response.dig("result", "credentials", "database")
-
-        @session_id
-      end
-
-      # Método genérico para obtener datos de Geotab
-      def fetch_data(type_name:, from_date: nil, to_date: nil, search: {})
-        ensure_authenticated!
-
-        search_params = search.dup
-        search_params[:FromDate] = format_date(from_date) if from_date
-        search_params[:ToDate] = format_date(to_date) if to_date
-
-        response = make_request(
-          method: "Get",
-          params: {
-            typeName: type_name,
-            search: search_params,
-            credentials: auth_credentials
-          }
-        )
-
-        response["result"] || []
-      end
-
-      # Obtener repostajes (FillUp)
-      def fetch_fillups(from_date:, to_date: Time.current)
-        fetch_data(
-          type_name: "FillUp",
-          from_date: from_date,
-          to_date: to_date
-        )
-      end
-
-      # Obtener cargas eléctricas (ChargeEvent)
-      def fetch_charge_events(from_date:, to_date: Time.current)
-        fetch_data(
-          type_name: "ChargeEvent",
-          from_date: from_date,
-          to_date: to_date
-        )
-      end
-
-      # Obtener dispositivos (para mapeo inicial)
-      def fetch_devices
-        ensure_authenticated!
-
-        response = make_request(
-          method: "Get",
-          params: {
-            typeName: "Device",
-            credentials: auth_credentials
-          }
-        )
-
-        response["result"] || []
-      end
-
-      # Obtener datos de odómetro
-      def fetch_odometer_readings(from_date:, to_date: Time.current, device_id: nil)
-        search_params = {}
-        search_params[:DeviceSearch] = { id: device_id } if device_id
-
-        fetch_data(
-          type_name: "StatusData",
-          from_date: from_date,
-          to_date: to_date,
-          search: search_params
-        )
+        # PASO 2: No hay cache, autenticar
+        authenticate_with_provider
       end
 
       private
 
-      def ensure_authenticated!
-        authenticate! unless authenticated?
+      def get_cached_session
+        cache_key = "geotab_session_#{@config.id}"
+        Rails.cache.read(cache_key)
       end
 
-      def authenticated?
-        @session_id.present?
+      def authenticate_with_provider
+        # Obtener el conector apropiado según el proveedor
+        connector = ConnectorFactory.build(@provider.slug)
+
+        # Llamar al método authenticate del conector
+        result = connector.authenticate(@config.credentials)
+
+        if result[:success]
+          session_id = result[:session_id]
+
+          # Cachear la sesión
+          cache_session(session_id)
+
+          ServiceResult.success(
+            data: { session_id: session_id },
+            message: "Autenticación exitosa"
+          )
+        else
+          ServiceResult.failure(
+            errors: [ result[:error] || "Error de autenticación desconocido" ]
+          )
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al autenticar: #{e.message}")
+        ServiceResult.failure(errors: [ "Error de autenticación: #{e.message}" ])
       end
 
-      def auth_credentials
-        {
-          database: @database,
-          userName: credentials[:userName],
-          sessionId: @session_id
-        }
+      def cache_session(session_id)
+        cache_key = "geotab_session_#{@config.id}"
+        Rails.cache.write(cache_key, session_id, expires_in: SESSION_TTL)
+        Rails.logger.info("✓ Sesión cacheada: #{cache_key}")
+      end
+    end
+  end
+end
+
+# app/services/integrations/connectors/base_connector.rb
+module Integrations
+  module Connectors
+    class BaseConnector
+      # Tiempo máximo de espera para requests HTTP
+      REQUEST_TIMEOUT = 30.seconds
+
+      # Métodos abstractos que deben implementar las subclases
+      def authenticate(credentials)
+        raise NotImplementedError, "Subclases deben implementar #authenticate"
       end
 
-      def make_request(method:, params:)
-        uri = URI(API_BASE_URL)
+      def fetch_refuelings(session_id, from_date, to_date)
+        raise NotImplementedError, "Subclases deben implementar #fetch_refuelings"
+      end
+
+      def fetch_electric_charges(session_id, from_date, to_date)
+        raise NotImplementedError, "Subclases deben implementar #fetch_electric_charges"
+      end
+
+      def fetch_trips(session_id, from_date, to_date)
+        raise NotImplementedError, "Subclases deben implementar #fetch_trips"
+      end
+
+      protected
+      # Realizar petición POST
+      def http_post(url, body, headers = {})
+        uri = URI.parse(url)
         http = Net::HTTP.new(uri.host, uri.port)
-        http.use_ssl = true
-        http.read_timeout = 120 # 2 minutos timeout
+        http.use_ssl = (uri.scheme == "https")
+        http.read_timeout = REQUEST_TIMEOUT
+        http.open_timeout = REQUEST_TIMEOUT
 
-        request = Net::HTTP::Post.new(uri.path, "Content-Type" => "application/json")
-        request.body = {
-          method: method,
-          params: params,
-          jsonrpc: "2.0",
-          id: SecureRandom.random_number(1000)
-        }.to_json
+        request = Net::HTTP::Post.new(uri.path, default_headers.merge(headers))
+        request.body = body.to_json
+
+        log_request(url, body)
 
         response = http.request(request)
 
-        handle_response(response)
-      rescue Net::ReadTimeout => e
-        raise TimeoutError, "Geotab API timeout: #{e.message}"
-      rescue StandardError => e
-        raise ConnectionError, "Geotab API error: #{e.message}"
+        log_response(response)
+
+        parse_response(response)
       end
 
-      def handle_response(response)
-        unless response.is_a?(Net::HTTPSuccess)
-          raise ApiError, "HTTP #{response.code}: #{response.body}"
+      # Realizar petición GET
+      def http_get(url, headers = {})
+        uri = URI.parse(url)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = (uri.scheme == "https")
+        http.read_timeout = REQUEST_TIMEOUT
+        http.open_timeout = REQUEST_TIMEOUT
+
+        request = Net::HTTP::Get.new(uri.request_uri, default_headers.merge(headers))
+
+        log_request(url, nil)
+
+        response = http.request(request)
+
+        log_response(response)
+
+        parse_response(response)
+      end
+
+      # Headers por defecto
+      def default_headers
+        {
+          "Content-Type" => "application/json",
+          "Accept" => "application/json"
+        }
+      end
+
+      # Parsear respuesta HTTP
+      def parse_response(response)
+        case response.code.to_i
+        when 200..299
+          JSON.parse(response.body)
+        when 401
+          raise AuthenticationError, "Error de autenticación: #{response.body}"
+        when 429
+          raise RateLimitError, "Límite de peticiones excedido"
+        when 500..599
+          raise ServerError, "Error del servidor: #{response.code}"
+        else
+          raise ApiError, "Error HTTP #{response.code}: #{response.body}"
         end
-
-        parsed = JSON.parse(response.body)
-
-        if parsed["error"]
-          error_message = parsed.dig("error", "message") || "Unknown error"
-          raise ApiError, "Geotab API error: #{error_message}"
-        end
-
-        parsed
       rescue JSON::ParserError => e
-        raise ApiError, "Invalid JSON response: #{e.message}"
+        raise ApiError, "Respuesta no es JSON válido: #{e.message}"
       end
 
-      def format_date(date)
-        date = date.to_time if date.is_a?(Date)
-        date.utc.iso8601(3) # Formato: 2025-01-01T00:00:00.000Z
+      def log_request(url, body)
+        Rails.logger.debug("→ #{self.class.name} POST #{url}")
+        Rails.logger.debug("  Body: #{body.to_json[0..200]}...") if body
       end
 
-      # Custom Exceptions
-      class GeotabError < StandardError; end
-      class AuthenticationError < GeotabError; end
-      class ApiError < GeotabError; end
-      class TimeoutError < GeotabError; end
-      class ConnectionError < GeotabError; end
+      def log_response(response)
+        Rails.logger.debug("← Response: #{response.code}")
+        Rails.logger.debug("  Body: #{response.body[0..200]}...")
+      end
+
+      class ApiError < StandardError; end
+      class AuthenticationError < ApiError; end
+      class RateLimitError < ApiError; end
+      class ServerError < ApiError; end
     end
   end
 end
-# app/services/telemetry/normalizers/geotab_normalizer.rb
-module Telemetry
-  module Normalizers
-    class GeotabNormalizer
-      PROVIDER_NAME = "geotab"
 
-      # Normaliza un repostaje de Geotab (FillUp) a nuestro modelo
-      def normalize_refuel(raw_fillup, vehicle_id)
-        {
-          vehicle_id: vehicle_id,
-          external_id: raw_fillup["id"],
-          provider_name: PROVIDER_NAME,
-          refuel_date: parse_datetime(raw_fillup["dateTime"]),
-          volume_liters: extract_volume(raw_fillup),
-          cost: raw_fillup["cost"].to_f,
-          currency_code: raw_fillup["currencyCode"]&.strip,
-          location_lat: extract_latitude(raw_fillup),
-          location_lng: extract_longitude(raw_fillup),
-          odometer_km: convert_meters_to_km(raw_fillup["odometer"]),
-          tank_capacity_liters: extract_tank_capacity(raw_fillup),
-          distance_since_last_refuel_km: convert_meters_to_km(raw_fillup["distance"]),
-          confidence_level: raw_fillup["confidence"],
-          product_type: raw_fillup["productType"],
-          raw_data: raw_fillup
+# app/services/integrations/connectors/geotab_connector.rb
+module Integrations
+  module Connectors
+    class GeotabConnector < BaseConnector
+      # URL base de la API de Geotab
+      API_BASE_URL = "https://my.geotab.com/apiv1"
+
+      # ========================================================================
+      # AUTENTICACIÓN
+      # ========================================================================
+      # Geotab usa un sistema de autenticación que retorna un sessionId
+      # Este sessionId debe usarse en todas las peticiones posteriores
+
+      def authenticate(credentials)
+        # Construir payload según documentación de Geotab
+        payload = {
+          method: "Authenticate",
+          params: {
+            userName: credentials["username"] || credentials[:username],
+            password: credentials["password"] || credentials[:password],
+            database: credentials["database"] || credentials[:database]
+          }
         }
+
+        # Realizar petición
+        response = http_post(API_BASE_URL, payload)
+
+        # Verificar respuesta
+        if response["result"] && response["result"]["credentials"]
+          session_id = response["result"]["credentials"]["sessionId"]
+
+          Rails.logger.info("✓ Autenticación Geotab exitosa")
+
+          {
+            success: true,
+            session_id: session_id,
+            database: response["result"]["credentials"]["database"],
+            path: response["result"]["path"]
+          }
+        else
+          {
+            success: false,
+            error: "Respuesta de autenticación inválida"
+          }
+        end
+
+      rescue AuthenticationError => e
+        Rails.logger.error("✗ Error de autenticación Geotab: #{e.message}")
+        { success: false, error: e.message }
+      rescue StandardError => e
+        Rails.logger.error("✗ Error inesperado en autenticación: #{e.message}")
+        { success: false, error: "Error de conexión: #{e.message}" }
       end
 
-      # Normaliza una carga eléctrica de Geotab (ChargeEvent) a nuestro modelo
-      def normalize_charge_event(raw_charge, vehicle_id)
-        {
-          vehicle_id: vehicle_id,
-          external_id: raw_charge["id"],
-          provider_name: PROVIDER_NAME,
-          start_time: parse_datetime(raw_charge["startTime"]),
-          duration_minutes: parse_duration_minutes(raw_charge["duration"]),
-          energy_consumed_kwh: raw_charge["energyConsumedKwh"].to_f,
-          start_soc_percent: raw_charge["startStateOfCharge"].to_f,
-          end_soc_percent: raw_charge["endStateOfCharge"].to_f,
-          charge_type: raw_charge["chargeType"],
-          charge_is_estimated: raw_charge["chargeIsEstimated"],
-          location_lat: extract_latitude(raw_charge),
-          location_lng: extract_longitude(raw_charge),
-          odometer_km: raw_charge["chargingStartedOdometerKm"].to_f,
-          peak_power_kw: raw_charge["peakPowerKw"].to_f,
-          measured_charger_energy_in_kwh: raw_charge["measuredOnBoardChargerEnergyInKwh"].to_f,
-          measured_battery_energy_in_kwh: raw_charge["measuredBatteryEnergyInKwh"].to_f,
-          raw_data: raw_charge
+      # ========================================================================
+      # OBTENER REPOSTAJES (FillUp)
+      # ========================================================================
+      # Geotab usa el tipo "FillUp" para representar repostajes de combustible
+
+      def fetch_refuelings(session_id, from_date, to_date)
+        # Construir payload según documentación de Geotab
+        payload = {
+          method: "Get",
+          params: {
+            typeName: "FillUp",
+            search: {
+              fromDate: format_date(from_date),
+              toDate: format_date(to_date)
+            },
+            credentials: build_credentials(session_id)
+          },
+          id: generate_request_id,
+          jsonrpc: "2.0"
         }
+
+        # Realizar petición
+        response = http_post(API_BASE_URL, payload)
+
+        # Extraer resultado
+        if response["result"].is_a?(Array)
+          Rails.logger.info("✓ Geotab: #{response['result'].count} repostajes obtenidos")
+          response["result"]
+        else
+          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
+          []
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("✗ Error al obtener repostajes: #{e.message}")
+        raise ApiError, "Error al obtener repostajes: #{e.message}"
       end
 
-      # Valida que los datos normalizados sean válidos
-      def validate_refuel(normalized_data)
-        errors = []
+      # ========================================================================
+      # OBTENER CARGAS ELÉCTRICAS (ChargeEvent)
+      # ========================================================================
+      # Geotab usa el tipo "ChargeEvent" para eventos de carga de vehículos eléctricos
 
-        errors << "Missing external_id" if normalized_data[:external_id].blank?
-        errors << "Missing refuel_date" if normalized_data[:refuel_date].blank?
-        errors << "Invalid volume" if normalized_data[:volume_liters].present? && normalized_data[:volume_liters] <= 0
-        errors << "Invalid cost" if normalized_data[:cost].present? && normalized_data[:cost] < 0
+      def fetch_electric_charges(session_id, from_date, to_date)
+        payload = {
+          method: "Get",
+          params: {
+            typeName: "ChargeEvent",
+            search: {
+              fromDate: format_date(from_date),
+              toDate: format_date(to_date)
+            },
+            credentials: build_credentials(session_id)
+          },
+          id: generate_request_id,
+          jsonrpc: "2.0"
+        }
 
-        errors
+        response = http_post(API_BASE_URL, payload)
+
+        if response["result"].is_a?(Array)
+          Rails.logger.info("✓ Geotab: #{response['result'].count} cargas eléctricas obtenidas")
+          response["result"]
+        else
+          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
+          []
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("✗ Error al obtener cargas: #{e.message}")
+        raise ApiError, "Error al obtener cargas: #{e.message}"
       end
 
-      def validate_charge_event(normalized_data)
-        errors = []
+      # ========================================================================
+      # OBTENER VIAJES (Trip)
+      # ========================================================================
+      # Geotab usa el tipo "Trip" para representar viajes/trayectos
 
-        errors << "Missing external_id" if normalized_data[:external_id].blank?
-        errors << "Missing start_time" if normalized_data[:start_time].blank?
-        errors << "Invalid energy" if normalized_data[:energy_consumed_kwh].present? && normalized_data[:energy_consumed_kwh] <= 0
-        errors << "Invalid SOC range" if invalid_soc_range?(normalized_data)
+      def fetch_trips(session_id, from_date, to_date)
+        payload = {
+          method: "Get",
+          params: {
+            typeName: "Trip",
+            search: {
+              fromDate: format_date(from_date),
+              toDate: format_date(to_date)
+            },
+            credentials: build_credentials(session_id)
+          },
+          id: generate_request_id,
+          jsonrpc: "2.0"
+        }
 
-        errors
+        response = http_post(API_BASE_URL, payload)
+
+        if response["result"].is_a?(Array)
+          Rails.logger.info("✓ Geotab: #{response['result'].count} viajes obtenidos")
+          response["result"]
+        else
+          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
+          []
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("✗ Error al obtener viajes: #{e.message}")
+        raise ApiError, "Error al obtener viajes: #{e.message}"
+      end
+
+      # ========================================================================
+      # MÉTODOS PARA PRUEBAS DE CONEXIÓN
+      # ========================================================================
+      # Para el botón "Probar Conexión" en la UI
+
+      def test_connection(credentials)
+        result = authenticate(credentials)
+
+        if result[:success]
+          {
+            success: true,
+            message: "Conexión exitosa con Geotab",
+            details: {
+              database: result[:database],
+              session_created: true
+            }
+          }
+        else
+          {
+            success: false,
+            error: result[:error]
+          }
+        end
       end
 
       private
 
-      def parse_datetime(datetime_str)
-        return nil if datetime_str.blank?
-        Time.zone.parse(datetime_str)
-      rescue ArgumentError
-        nil
+      # ========================================================================
+      # UTILIDADES
+      # ========================================================================
+
+      # Construir objeto credentials para peticiones posteriores
+      def build_credentials(session_id)
+        {
+          database: @database || "database",
+          userName: @username || "user",
+          sessionId: session_id
+        }
       end
 
-      def extract_volume(fillup)
-        # Geotab puede devolver 'volume' o 'derivedVolume'
-        volume = fillup["volume"] || fillup["derivedVolume"]
-        volume.to_f if volume.present?
+      # Formatear fecha al formato que espera Geotab
+      # Formato: "2025-01-01T00:00:00.000Z" (ISO 8601)
+      def format_date(date)
+        date = Time.zone.parse(date.to_s) unless date.is_a?(Time)
+        date.utc.iso8601(3)
       end
 
-      def extract_latitude(data)
-        data.dig("location", "y")&.to_f
-      end
-
-      def extract_longitude(data)
-        data.dig("location", "x")&.to_f
-      end
-
-      def extract_tank_capacity(fillup)
-        fillup.dig("tankCapacity", "volume")&.to_f
-      end
-
-      def convert_meters_to_km(meters)
-        return nil if meters.blank?
-        (meters.to_f / 1000.0).round(2)
-      end
-
-      def parse_duration_minutes(duration_str)
-        # Formato Geotab: "03:28:33.2580000" (HH:MM:SS.mmmmmmm)
-        return nil if duration_str.blank?
-
-        parts = duration_str.split(":")
-        hours = parts[0].to_i
-        minutes = parts[1].to_i
-        seconds = parts[2].to_f
-
-        (hours * 60) + minutes + (seconds / 60.0).round(2)
-      rescue StandardError
-        nil
-      end
-
-      def invalid_soc_range?(data)
-        start_soc = data[:start_soc_percent]
-        end_soc = data[:end_soc_percent]
-
-        return false if start_soc.blank? || end_soc.blank?
-
-        start_soc < 0 || start_soc > 100 || end_soc < 0 || end_soc > 100
+      # Generar ID único para request (para trazabilidad)
+      def generate_request_id
+        SecureRandom.uuid
       end
     end
   end
 end
-# app/services/telemetry/credential_validator.rb
-module Telemetry
-  class CredentialValidator
-    attr_reader :provider, :credentials, :errors
 
-    def initialize(provider, credentials)
-      @provider = provider
-      @credentials = credentials.with_indifferent_access
-      @errors = []
-    end
-
-    def valid?
-      validate_required_fields
-      validate_field_formats
-      errors.empty?
-    end
-
-    def self.validate!(provider, credentials)
-      validator = new(provider, credentials)
-      unless validator.valid?
-        raise ValidationError, validator.errors.join(", ")
-      end
-      true
-    end
-
-    private
-
-    def validate_required_fields
-      schema_fields.each do |field|
-        next unless field[:required]
-
-        field_name = field[:name]
-        if credentials[field_name].blank?
-          @errors << "#{field[:label]} is required"
+# app/services/integrations/factories/connector_factory.rb
+module Integrations
+  module Factories
+    class ConnectorFactory
+      # Método estático para construir el conector apropiado
+      def self.build(provider_slug)
+        case provider_slug
+        when "geotab"
+          Connectors::GeotabConnector.new
+        when "verizon_connect"
+          Connectors::VerizonConnector.new
+        when "tomtom_telematics"
+          Connectors::TomtomConnector.new
+        else
+          raise ArgumentError, "Conector no implementado para: #{provider_slug}"
         end
       end
     end
-
-    def validate_field_formats
-      schema_fields.each do |field|
-        field_name = field[:name]
-        value = credentials[field_name]
-
-        next if value.blank?
-
-        case field[:type]
-        when "email"
-          validate_email_format(field, value)
-        when "url"
-          validate_url_format(field, value)
-        when "integer"
-          validate_integer_format(field, value)
-        end
-
-        # Validaciones adicionales definidas en el schema
-        validate_pattern(field, value) if field[:pattern]
-        validate_length(field, value) if field[:min_length] || field[:max_length]
-      end
-    end
-
-    def validate_email_format(field, value)
-      unless value.match?(URI::MailTo::EMAIL_REGEXP)
-        @errors << "#{field[:label]} must be a valid email"
-      end
-    end
-
-    def validate_url_format(field, value)
-      unless value.match?(URI::DEFAULT_PARSER.make_regexp(%w[http https]))
-        @errors << "#{field[:label]} must be a valid URL"
-      end
-    end
-
-    def validate_integer_format(field, value)
-      unless value.to_s.match?(/\A\d+\z/)
-        @errors << "#{field[:label]} must be a number"
-      end
-    end
-
-    def validate_pattern(field, value)
-      pattern = Regexp.new(field[:pattern])
-      unless value.match?(pattern)
-        @errors << "#{field[:label]} format is invalid"
-      end
-    end
-
-    def validate_length(field, value)
-      if field[:min_length] && value.length < field[:min_length]
-        @errors << "#{field[:label]} must be at least #{field[:min_length]} characters"
-      end
-
-      if field[:max_length] && value.length > field[:max_length]
-        @errors << "#{field[:label]} must be at most #{field[:max_length]} characters"
-      end
-    end
-
-    def schema_fields
-      @schema_fields ||= provider.configuration_schema.fetch("fields", [])
-    end
-
-    class ValidationError < StandardError; end
-  end
-end
-# app/services/telemetry/provider_registry.rb
-module Telemetry
-  class ProviderRegistry
-    class << self
-      # Registro de connectors
-      def connectors
-        @connectors ||= {}
-      end
-
-      # Registro de normalizers
-      def normalizers
-        @normalizers ||= {}
-      end
-
-      # Registrar un proveedor completo
-      def register(provider_slug, connector_class:, normalizer_class:)
-        connectors[provider_slug.to_s] = connector_class
-        normalizers[provider_slug.to_s] = normalizer_class
-      end
-
-      # Obtener connector para un proveedor
-      def connector_for(provider_slug)
-        connector_class = connectors[provider_slug.to_s]
-        raise UnknownProviderError, "No connector registered for '#{provider_slug}'" unless connector_class
-        connector_class
-      end
-
-      # Obtener normalizer para un proveedor
-      def normalizer_for(provider_slug)
-        normalizer_class = normalizers[provider_slug.to_s]
-        raise UnknownProviderError, "No normalizer registered for '#{provider_slug}'" unless normalizer_class
-        normalizer_class
-      end
-
-      # Verificar si un proveedor está registrado
-      def registered?(provider_slug)
-        connectors.key?(provider_slug.to_s) && normalizers.key?(provider_slug.to_s)
-      end
-
-      # Listar proveedores registrados
-      def registered_providers
-        connectors.keys & normalizers.keys
-      end
-
-      # Instanciar connector con credenciales
-      def build_connector(provider_slug, credentials)
-        connector_class = connector_for(provider_slug)
-        connector_class.new(credentials)
-      end
-
-      # Instanciar normalizer
-      def build_normalizer(provider_slug)
-        normalizer_class = normalizer_for(provider_slug)
-        normalizer_class.new
-      end
-    end
-
-    class UnknownProviderError < StandardError; end
   end
 end
 
-# Registrar proveedores existentes
-# Este código se ejecuta al cargar Rails
-Telemetry::ProviderRegistry.register(
-  "geotab",
-  connector_class: Telemetry::Connectors::GeotabConnector,
-  normalizer_class: Telemetry::Normalizers::GeotabNormalizer
-)
+# app/services/integrations/factories/normalizer_factory.rb
+module Integrations
+  module Factories
+    class NormalizerFactory
+      def self.build(provider_slug, feature_key)
+        # Construir el nombre de la clase del normalizador
+        # Ejemplo: 'geotab' + 'fuel' → Integrations::Normalizers::Geotab::RefuelingNormalizer
 
-# Cuando añadas nuevos proveedores, solo agrégalos aquí:
-# Telemetry::ProviderRegistry.register(
-#   'verizon_connect',
-#   connector_class: Telemetry::Connectors::VerizonConnector,
-#   normalizer_class: Telemetry::Normalizers::VerizonNormalizer
-# )
-
-# app/services/telemetry/sync_service.rb
-module Telemetry
-  class SyncService
-    attr_reader :credential, :sync_log, :stats
-
-    def initialize(telemetry_credential)
-      @credential = telemetry_credential
-      @sync_log = nil
-      @stats = {
-        processed: 0,
-        created: 0,
-        updated: 0,
-        skipped: 0,
-        errors: []
-      }
-    end
-
-    # Sincronizar repostajes
-    def sync_refuels(vehicle_id: nil, from_date: nil, to_date: nil)
-      execute_sync(sync_type: "refuels", vehicle_id: vehicle_id) do
-        from_date ||= credential.from_date_for_sync
-        to_date ||= Time.current
-
-        connector = build_connector
-        normalizer = build_normalizer
-
-        # Obtener datos raw de Geotab
-        raw_fillups = connector.fetch_fillups(from_date: from_date, to_date: to_date)
-
-        # Procesar cada repostaje
-        raw_fillups.each do |raw_fillup|
-          process_refuel(raw_fillup, normalizer)
+        case provider_slug
+        when "geotab"
+          build_geotab_normalizer(feature_key)
+        when "verizon_connect"
+          build_verizon_normalizer(feature_key)
+        when "tomtom_telematics"
+          build_tomtom_normalizer(feature_key)
+        else
+          raise ArgumentError, "Normalizador no implementado para: #{provider_slug}"
         end
       end
-    end
 
-    # Sincronizar cargas eléctricas
-    def sync_charges(vehicle_id: nil, from_date: nil, to_date: nil)
-      execute_sync(sync_type: "charges", vehicle_id: vehicle_id) do
-        from_date ||= credential.from_date_for_sync
-        to_date ||= Time.current
+      private
 
-        connector = build_connector
-        normalizer = build_normalizer
-
-        # Obtener datos raw de Geotab
-        raw_charges = connector.fetch_charge_events(from_date: from_date, to_date: to_date)
-
-        # Procesar cada carga
-        raw_charges.each do |raw_charge|
-          process_charge(raw_charge, normalizer)
+      def self.build_geotab_normalizer(feature_key)
+        case feature_key
+        when "fuel"
+          Normalizers::Geotab::RefuelingNormalizer.new
+        when "battery"
+          Normalizers::Geotab::ElectricChargeNormalizer.new
+        when "trips"
+          Normalizers::Geotab::TripNormalizer.new
+        else
+          raise ArgumentError, "Feature no soportada para Geotab: #{feature_key}"
         end
       end
+
+      def self.build_verizon_normalizer(feature_key)
+        # TODO: Implementar normalizadores de Verizon
+        raise NotImplementedError, "Normalizadores de Verizon pendientes"
+      end
+
+      def self.build_tomtom_normalizer(feature_key)
+        # TODO: Implementar normalizadores de TomTom
+        raise NotImplementedError, "Normalizadores de TomTom pendientes"
+      end
     end
+  end
+end
 
-    # Sincronización completa
-    def sync_all(from_date: nil, to_date: nil)
-      results = {}
+# app/services/integrations/marketplace/setup_integration_service.rb
+module Integrations
+  module Marketplace
+    class SetupIntegrationService
+      # Servicio orquestador que maneja TODO el flujo de configuración
+      # desde el marketplace hasta la activación final
 
-      results[:refuels] = sync_refuels(from_date: from_date, to_date: to_date)
-      results[:charges] = sync_charges(from_date: from_date, to_date: to_date)
+      def initialize(tenant, provider_slug, params)
+        @tenant = tenant
+        @provider_slug = provider_slug
+        @params = params
+      end
 
-      results
-    end
+      def call
+        # PASO 1: Validar proveedor
+        provider = validate_provider
+        return provider unless provider.is_a?(IntegrationProvider)
 
-    private
+        # PASO 2: Validar que el tenant no tenga ya este proveedor
+        existing = check_existing_configuration(provider)
+        return existing if existing.failure?
 
-    def execute_sync(sync_type:, vehicle_id: nil)
-      @sync_log = create_sync_log(sync_type: sync_type, vehicle_id: vehicle_id)
-      started_at = Time.current
+        # PASO 3: Validar estructura de credenciales
+        validation = validate_credentials_structure(provider)
+        return validation if validation.failure?
 
-      begin
-        yield # Ejecuta el bloque de sincronización
+        # PASO 4: (OPCIONAL) Probar conexión si se solicita
+        if @params[:test_connection_first]
+          connection_test = test_connection_before_create(provider)
+          return connection_test if connection_test.failure?
+        end
 
-        # Actualizar log como exitoso
-        status = @stats[:errors].any? ? "partial" : "success"
-        complete_sync_log(status: status, started_at: started_at)
+        # PASO 5: Crear configuración (inactiva)
+        config = create_configuration(provider)
+        return config if config.failure?
 
-        # Actualizar timestamp de la credencial
-        credential.update_sync_timestamp!(successful: status == "success")
+        # PASO 6: (OPCIONAL) Activar inmediatamente si se solicita
+        if @params[:activate_immediately]
+          activation = activate_configuration(config.data)
+          return activation if activation.failure?
+        end
 
-        build_result(success: true)
-      rescue Connectors::GeotabConnector::GeotabError => e
-        complete_sync_log(status: "error", started_at: started_at, error: e)
-        build_result(success: false, error: e.message)
+        # PASO 7: Retornar resultado exitoso
+        ServiceResult.success(
+          data: config.data,
+          message: build_success_message(config.data)
+        )
+
       rescue StandardError => e
-        complete_sync_log(status: "error", started_at: started_at, error: e)
-        build_result(success: false, error: e.message)
-      end
-    end
-
-    def process_refuel(raw_fillup, normalizer)
-      @stats[:processed] += 1
-
-      # Obtener el vehicle_id del dispositivo
-      vehicle = find_vehicle_by_device(raw_fillup.dig("device", "id"))
-
-      unless vehicle
-        @stats[:skipped] += 1
-        log_error(
-          raw_data: raw_fillup,
-          error_type: "mapping_error",
-          error_message: "Vehicle not found for device #{raw_fillup.dig('device', 'id')}"
+        Rails.logger.error("Error en SetupIntegrationService: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al configurar integración: #{e.message}" ]
         )
-        return
       end
 
-      # Normalizar datos
-      normalized = normalizer.normalize_refuel(raw_fillup, vehicle.id)
+      private
 
-      # Validar
-      validation_errors = normalizer.validate_refuel(normalized)
-      if validation_errors.any?
-        @stats[:skipped] += 1
-        log_error(
-          raw_data: raw_fillup,
-          error_type: "validation_error",
-          error_message: validation_errors.join(", ")
+      # ======================================================================
+      # PASO 1: Validar Proveedor
+      # ======================================================================
+      def validate_provider
+        provider = IntegrationProvider.for_marketplace.find_by(slug: @provider_slug)
+
+        unless provider
+          return ServiceResult.failure(
+            errors: [ "Proveedor '#{@provider_slug}' no encontrado o no disponible" ]
+          )
+        end
+
+        unless provider.integration_auth_schema&.is_active
+          return ServiceResult.failure(
+            errors: [ "El proveedor no tiene configuración de autenticación disponible" ]
+          )
+        end
+
+        provider
+      end
+
+      # ======================================================================
+      # PASO 2: Verificar Configuración Existente
+      # ======================================================================
+      def check_existing_configuration(provider)
+        existing = @tenant.tenant_integration_configurations.find_by(
+          integration_provider: provider
         )
-        return
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "Ya existe una configuración para este proveedor" ],
+            data: { existing_configuration_id: existing.id }
+          )
+        end
+
+        ServiceResult.success
       end
 
-      # Crear o actualizar
-      refuel = Refuel.find_or_initialize_by(
-        vehicle_id: normalized[:vehicle_id],
-        external_id: normalized[:external_id],
-        provider_name: normalized[:provider_name]
-      )
+      # ======================================================================
+      # PASO 3: Validar Credenciales
+      # ======================================================================
+      def validate_credentials_structure(provider)
+        credentials = @params[:credentials]
 
-      if refuel.new_record?
-        refuel.assign_attributes(normalized)
-        refuel.save!
-        @stats[:created] += 1
-      else
-        refuel.update!(normalized)
-        @stats[:updated] += 1
+        unless credentials.is_a?(Hash) && credentials.present?
+          return ServiceResult.failure(
+            errors: [ "Las credenciales son requeridas" ]
+          )
+        end
+
+        schema = provider.integration_auth_schema
+        required_fields = schema.required_fields.map { |f| f["name"] }
+        provided_fields = credentials.keys.map(&:to_s)
+
+        missing_fields = required_fields - provided_fields
+
+        if missing_fields.any?
+          return ServiceResult.failure(
+            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
       end
 
-    rescue StandardError => e
-      @stats[:skipped] += 1
-      log_error(
-        raw_data: raw_fillup,
-        error_type: "data_format_error",
-        error_message: e.message
-      )
-    end
+      # ======================================================================
+      # PASO 4: Test de Conexión (Opcional)
+      # ======================================================================
+      def test_connection_before_create(provider)
+        Rails.logger.info("→ Probando conexión antes de crear configuración...")
 
-    def process_charge(raw_charge, normalizer)
-      @stats[:processed] += 1
+        result = TenantConfigurations::TestConnectionService.new(
+          provider.id,
+          @params[:credentials]
+        ).call
 
-      # Obtener el vehicle_id del dispositivo
-      vehicle = find_vehicle_by_device(raw_charge.dig("device", "id"))
+        unless result.success?
+          return ServiceResult.failure(
+            errors: [ "Test de conexión falló: #{result.errors.join(', ')}" ]
+          )
+        end
 
-      unless vehicle
-        @stats[:skipped] += 1
-        log_error(
-          raw_data: raw_charge,
-          error_type: "mapping_error",
-          error_message: "Vehicle not found for device #{raw_charge.dig('device', 'id')}"
+        Rails.logger.info("✓ Test de conexión exitoso")
+        ServiceResult.success
+      end
+
+      # ======================================================================
+      # PASO 5: Crear Configuración
+      # ======================================================================
+      def create_configuration(provider)
+        config = @tenant.tenant_integration_configurations.build(
+          integration_provider: provider,
+          credentials: @params[:credentials],
+          enabled_features: @params[:enabled_features] || [],
+          sync_frequency: @params[:sync_frequency] || "daily",
+          sync_hour: @params[:sync_hour] || 2,
+          sync_day_of_week: @params[:sync_day_of_week],
+          sync_day_of_month: @params[:sync_day_of_month],
+          sync_config: @params[:sync_config] || {},
+          is_active: false # Siempre empieza inactiva
         )
-        return
+
+        if config.save
+          Rails.logger.info("✓ Configuración creada (ID: #{config.id})")
+          ServiceResult.success(data: config)
+        else
+          ServiceResult.failure(
+            errors: config.errors.full_messages
+          )
+        end
       end
 
-      # Normalizar datos
-      normalized = normalizer.normalize_charge_event(raw_charge, vehicle.id)
+      # ======================================================================
+      # PASO 6: Activar Configuración (Opcional)
+      # ======================================================================
+      def activate_configuration(config)
+        # Validar que tenga al menos una feature habilitada
+        unless config.enabled_features.any?
+          return ServiceResult.failure(
+            errors: [ "Debe seleccionar al menos una funcionalidad antes de activar" ]
+          )
+        end
 
-      # Validar
-      validation_errors = normalizer.validate_charge_event(normalized)
-      if validation_errors.any?
-        @stats[:skipped] += 1
-        log_error(
-          raw_data: raw_charge,
-          error_type: "validation_error",
-          error_message: validation_errors.join(", ")
+        if config.update(is_active: true, activated_at: Time.current)
+          Rails.logger.info("✓ Configuración activada")
+          ServiceResult.success(data: config)
+        else
+          ServiceResult.failure(
+            errors: config.errors.full_messages
+          )
+        end
+      end
+
+       def build_success_message(config)
+        base = "Integración con #{config.integration_provider.name} configurada exitosamente"
+
+        if config.is_active
+          "#{base} y activada"
+        else
+          "#{base}. Recuerda activarla para comenzar a sincronizar"
+        end
+      end
+    end
+  end
+end
+
+# app/services/integrations/marketplace/unified_marketplace_service.rb
+module Integrations
+  module Marketplace
+    class UnifiedMarketplaceService
+      def initialize(filters = {})
+        @view = filters[:view] || "grouped"
+        @category_slug = filters[:category_slug]
+        @provider_status = filters[:provider_status]
+        @is_premium = filters[:is_premium]
+        @search = filters[:search]
+        @include_features = filters[:include_features]
+        @include_auth_info = filters[:include_auth_info]
+        @include_stats = filters[:include_stats]
+      end
+
+      def call
+        case @view
+        when "grouped"
+          get_grouped_marketplace
+        when "flat"
+          get_flat_marketplace
+        when "category_detail"
+          get_category_detail
+        else
+          ServiceResult.failure(errors: [ "Vista no válida: #{@view}" ])
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error en UnifiedMarketplaceService: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al cargar el marketplace: #{e.message}" ])
+      end
+
+      private
+
+      def get_grouped_marketplace
+        # Obtener categorías activas
+        categories = IntegrationCategory.active.ordered
+
+        # Aplicar filtro de categoría específica si existe
+        categories = categories.where(slug: @category_slug) if @category_slug.present?
+
+        # Aplicar búsqueda
+        categories = apply_search_to_categories(categories) if @search.present?
+
+        # Precargar relaciones
+        categories = categories.includes(
+          integration_providers: [ :integration_features, :integration_auth_schema ]
         )
-        return
+
+        # Filtrar proveedores dentro de cada categoría
+        categories_data = categories.map do |category|
+          providers = filter_providers(category.integration_providers.for_marketplace)
+
+          # Solo incluir categorías que tienen proveedores después del filtrado
+          next if providers.empty?
+
+          {
+            category: category,
+            providers: providers
+          }
+        end.compact
+
+        ServiceResult.success(
+          data: {
+            categories: categories_data.map { |c| c[:category] },
+            total_categories: categories_data.count,
+            total_providers: categories_data.sum { |c| c[:providers].count }
+          }
+        )
       end
 
-      # Crear o actualizar
-      charge = ElectricCharge.find_or_initialize_by(
-        vehicle_id: normalized[:vehicle_id],
-        external_id: normalized[:external_id],
-        provider_name: normalized[:provider_name]
-      )
+      def get_flat_marketplace
+        # Obtener todos los proveedores activos
+        providers = IntegrationProvider.for_marketplace
 
-      if charge.new_record?
-        charge.assign_attributes(normalized)
-        charge.save!
-        @stats[:created] += 1
-      else
-        charge.update!(normalized)
-        @stats[:updated] += 1
+        # Filtrar por categoría
+        if @category_slug.present?
+          category = IntegrationCategory.find_by(slug: @category_slug)
+          providers = providers.where(integration_category: category) if category
+        end
+
+        # Aplicar filtros
+        providers = filter_providers(providers)
+
+        # Aplicar búsqueda
+        providers = apply_search_to_providers(providers) if @search.present?
+
+        # Precargar relaciones
+        providers = providers.includes(
+          :integration_category,
+          :integration_features,
+          :integration_auth_schema
+        )
+
+        ServiceResult.success(
+          data: {
+            providers: providers,
+            total_providers: providers.count,
+            filters_applied: active_filters
+          }
+        )
       end
 
-    rescue StandardError => e
-      @stats[:skipped] += 1
-      log_error(
-        raw_data: raw_charge,
-        error_type: "data_format_error",
-        error_message: e.message
-      )
+      def get_category_detail
+        unless @category_slug.present?
+          return ServiceResult.failure(
+            errors: [ "Se requiere 'category_slug' para la vista category_detail" ]
+          )
+        end
+
+        category = IntegrationCategory
+          .active
+          .includes(integration_providers: [ :integration_features, :integration_auth_schema ])
+          .find_by(slug: @category_slug)
+
+        unless category
+          return ServiceResult.failure(
+            errors: [ "Categoría '#{@category_slug}' no encontrada" ]
+          )
+        end
+
+        # Filtrar proveedores
+        providers = filter_providers(category.integration_providers.for_marketplace)
+
+        ServiceResult.success(
+          data: {
+            category: category,
+            providers: providers,
+            providers_count: providers.count
+          }
+        )
+      end
+
+      def filter_providers(providers)
+        # Filtrar por estado
+        if @provider_status.present?
+          providers = providers.where(status: @provider_status)
+        end
+
+        # Filtrar por premium
+        unless @is_premium.nil?
+          providers = providers.where(is_premium: @is_premium)
+        end
+
+        providers
+      end
+
+      def apply_search_to_providers(providers)
+        search_term = "%#{@search}%"
+        providers.where(
+          "integration_providers.name ILIKE :term OR integration_providers.description ILIKE :term",
+          term: search_term
+        )
+      end
+
+      def apply_search_to_categories(categories)
+        search_term = "%#{@search}%"
+        categories.where(
+          "integration_categories.name ILIKE :term OR integration_categories.description ILIKE :term",
+          term: search_term
+        )
+      end
+
+      def active_filters
+        {
+          view: @view,
+          category_slug: @category_slug,
+          provider_status: @provider_status,
+          is_premium: @is_premium,
+          search: @search
+        }.compact
+      end
     end
+  end
+end
 
-    def find_vehicle_by_device(device_id)
-      return nil if device_id.blank?
+# app/services/integrations/normalizers/geotab/electric_charge_normalizer.rb
+module Integrations
+  module Normalizers
+    module Geotab
+      class ElectricChargeNormalizer < BaseNormalizer
+        REQUIRED_FIELDS = %w[startTime duration device.id].freeze
 
-      config = VehicleTelemetryConfig
-        .where(telemetry_credential_id: credential.id)
-        .find_by(external_device_id: device_id)
+        def normalize(raw_data, config)
+          validate_required_fields(raw_data, REQUIRED_FIELDS)
 
-      config&.vehicle
+          data = extract_charge_data(raw_data, config)
+          charge = create_charge_record(data, raw_data, config)
+
+          ServiceResult.success(data: charge)
+        rescue StandardError => e
+          ServiceResult.failure(errors: [ e.message ])
+        end
+
+        private
+
+        def extract_charge_data(raw_data, config)
+          external_vehicle_id = extract_field(raw_data, "device.id")
+          vehicle = map_vehicle(external_vehicle_id, config)
+
+          start_time = parse_date(extract_field(raw_data, "startTime"))
+          duration_str = extract_field(raw_data, "duration") # "03:28:33.258"
+          duration_minutes = parse_duration_to_minutes(duration_str)
+
+          {
+            vehicle: vehicle,
+            charge_start_time: start_time,
+            charge_end_time: start_time + duration_minutes.minutes,
+            duration_minutes: duration_minutes,
+            location_lat: extract_field(raw_data, "location.y"),
+            location_lng: extract_field(raw_data, "location.x"),
+            charge_type: extract_field(raw_data, "chargeType"),
+            start_soc_percent: extract_field(raw_data, "startStateOfCharge")&.to_f,
+            end_soc_percent: extract_field(raw_data, "endStateOfCharge")&.to_f,
+            energy_consumed_kwh: extract_field(raw_data, "energyConsumedKwh")&.to_f,
+            peak_power_kw: extract_field(raw_data, "peakPowerKw")&.to_f,
+            odometer_km: convert_to_km(extract_field(raw_data, "chargingStartedOdometerKm")),
+            is_estimated: extract_field(raw_data, "chargeIsEstimated") || false,
+            max_ac_voltage: extract_field(raw_data, "maxACVoltage")&.to_i,
+            provider_metadata: build_metadata(raw_data)
+          }
+        end
+
+        def create_charge_record(data, raw_data, config)
+          VehicleElectricCharge.create!(
+            tenant: config.tenant,
+            vehicle: data[:vehicle],
+            integration_raw_data: raw_data,
+            charge_start_time: data[:charge_start_time],
+            charge_end_time: data[:charge_end_time],
+            duration_minutes: data[:duration_minutes],
+            location_lat: data[:location_lat],
+            location_lng: data[:location_lng],
+            charge_type: data[:charge_type],
+            start_soc_percent: data[:start_soc_percent],
+            end_soc_percent: data[:end_soc_percent],
+            energy_consumed_kwh: data[:energy_consumed_kwh],
+            peak_power_kw: data[:peak_power_kw],
+            odometer_km: data[:odometer_km],
+            is_estimated: data[:is_estimated],
+            max_ac_voltage: data[:max_ac_voltage],
+            provider_metadata: data[:provider_metadata]
+          )
+        end
+
+        def parse_duration_to_minutes(duration_str)
+          # "03:28:33.258" → 208 minutos
+          return nil if duration_str.blank?
+
+          parts = duration_str.split(":")
+          hours = parts[0].to_i
+          minutes = parts[1].to_i
+
+          (hours * 60) + minutes
+        end
+
+        def convert_to_km(value)
+          value&.to_f
+        end
+
+        def build_metadata(raw_data)
+          {
+            measured_onboard_charger_energy_in: extract_field(raw_data, "measuredOnBoardChargerEnergyInKwh"),
+            measured_battery_energy_in: extract_field(raw_data, "measuredBatteryEnergyInKwh"),
+            version: extract_field(raw_data, "version")
+          }.compact
+        end
+      end
     end
+  end
+end
 
-    def build_connector
-      provider_slug = credential.provider_name
+# app/services/integrations/normalizers/geotab/refueling_normalizer.rb
+module Integrations
+  module Normalizers
+    module Geotab
+      class RefuelingNormalizer < BaseNormalizer
+        # Campos requeridos en el JSON de Geotab
+        REQUIRED_FIELDS = %w[dateTime volume device.id].freeze
 
-      # Usar el registry en lugar de case/when
-      Telemetry::ProviderRegistry.build_connector(
-        provider_slug,
-        credential.credentials_hash
-      )
-    rescue Telemetry::ProviderRegistry::UnknownProviderError => e
-      raise "Provider '#{provider_slug}' not implemented: #{e.message}"
+        def normalize(raw_data, config)
+          # PASO 1: Validar campos requeridos
+          validate_required_fields(raw_data, REQUIRED_FIELDS)
+
+          # PASO 2: Extraer datos del JSON RAW
+          data = extract_refueling_data(raw_data, config)
+
+          # PASO 3: Crear registro en VehicleRefueling
+          refueling = create_refueling_record(data, raw_data, config)
+
+          ServiceResult.success(
+            data: refueling,
+            message: "Repostaje normalizado exitosamente"
+          )
+
+        rescue StandardError => e
+          ServiceResult.failure(errors: [ e.message ])
+        end
+
+        private
+
+        # ========================================================================
+        # EXTRAER DATOS
+        # ========================================================================
+
+        def extract_refueling_data(raw_data, config)
+          # Extraer external_vehicle_id
+          external_vehicle_id = extract_field(raw_data, "device.id")
+
+          # Mapear a vehicle de nuestra BD
+          vehicle = map_vehicle(external_vehicle_id, config)
+
+          # Extraer campos del JSON
+          {
+            vehicle: vehicle,
+            refueling_date: parse_date(extract_field(raw_data, "dateTime")),
+            volume_liters: extract_field(raw_data, "volume")&.to_f,
+            cost: extract_field(raw_data, "cost")&.to_f,
+            currency: extract_field(raw_data, "currencyCode")&.strip,
+            odometer_km: convert_to_km(extract_field(raw_data, "odometer")),
+            location_lat: extract_field(raw_data, "location.y"),
+            location_lng: extract_field(raw_data, "location.x"),
+            fuel_type: extract_field(raw_data, "productType") || "Unknown",
+            confidence_level: extract_field(raw_data, "confidence"),
+            is_estimated: false, # Geotab marca FillUp como medido
+            tank_capacity_liters: extract_tank_capacity(raw_data),
+            provider_metadata: build_metadata(raw_data)
+          }
+        end
+
+        # ========================================================================
+        # CREAR REGISTRO
+        # ========================================================================
+
+        def create_refueling_record(data, raw_data, config)
+          VehicleRefueling.create!(
+            tenant: config.tenant,
+            vehicle: data[:vehicle],
+            integration_raw_data: raw_data,
+            refueling_date: data[:refueling_date],
+            volume_liters: data[:volume_liters],
+            cost: data[:cost],
+            currency: data[:currency],
+            odometer_km: data[:odometer_km],
+            location_lat: data[:location_lat],
+            location_lng: data[:location_lng],
+            fuel_type: data[:fuel_type],
+            confidence_level: data[:confidence_level],
+            is_estimated: data[:is_estimated],
+            tank_capacity_liters: data[:tank_capacity_liters],
+            provider_metadata: data[:provider_metadata]
+          )
+        end
+
+        # ========================================================================
+        # UTILIDADES ESPECÍFICAS DE GEOTAB
+        # ========================================================================
+
+        def convert_to_km(odometer_value)
+          return nil if odometer_value.nil?
+          # Geotab devuelve odómetro en metros, convertir a km
+          (odometer_value.to_f / 1000).round(2)
+        end
+
+        def extract_tank_capacity(raw_data)
+          capacity = extract_field(raw_data, "tankCapacity.volume")
+          capacity&.to_f
+        end
+
+        def build_metadata(raw_data)
+          {
+            distance: extract_field(raw_data, "distance"),
+            total_fuel_used: extract_field(raw_data, "totalFuelUsed"),
+            derived_volume: extract_field(raw_data, "derivedVolume"),
+            version: extract_field(raw_data, "version")
+          }.compact
+        end
+      end
     end
+  end
+end
 
-    def build_normalizer
-      provider_slug = credential.provider_name
+# app/services/integrations/normalizers/base_normalizer.rb
+module Integrations
+  module Normalizers
+    class BaseNormalizer
+      # Método principal que debe implementar cada normalizador
+      def normalize(raw_data, config)
+        raise NotImplementedError, "Subclases deben implementar #normalize"
+      end
 
-      # Usar el registry en lugar de case/when
-      Telemetry::ProviderRegistry.build_normalizer(provider_slug)
-    rescue Telemetry::ProviderRegistry::UnknownProviderError => e
-      raise "Provider '#{provider_slug}' not implemented: #{e.message}"
+      protected
+
+      # ========================================================================
+      # MÉTODOS AUXILIARES COMPARTIDOS
+      # ========================================================================
+
+      # Mapear external_vehicle_id a vehicle_id de nuestra BD
+      def map_vehicle(external_vehicle_id, config)
+        mapping = VehicleProviderMapping.find_by(
+          tenant_integration_configuration: config,
+          external_vehicle_id: external_vehicle_id,
+          is_active: true
+        )
+
+        unless mapping
+          raise "Vehicle mapping not found for external_id: #{external_vehicle_id}"
+        end
+
+        mapping.vehicle
+      end
+
+      # Extraer valor de un campo del raw_data
+      def extract_field(raw_data, field_path)
+        # Soporta paths anidados: 'device.id', 'location.x'
+        fields = field_path.split(".")
+        value = raw_data.raw_data
+
+        fields.each do |field|
+          value = value[field] || value[field.to_sym]
+          return nil if value.nil?
+        end
+
+        value
+      end
+
+      # Parsear fecha del proveedor
+      def parse_date(date_string)
+        return nil if date_string.blank?
+        Time.zone.parse(date_string)
+      rescue ArgumentError => e
+        Rails.logger.warn("Error al parsear fecha '#{date_string}': #{e.message}")
+        nil
+      end
+
+      # Validar que campos requeridos existan
+      def validate_required_fields(raw_data, required_fields)
+        missing = required_fields.select { |field| extract_field(raw_data, field).nil? }
+
+        if missing.any?
+          raise "Campos requeridos faltantes: #{missing.join(', ')}"
+        end
+      end
     end
+  end
+end
 
-    def create_sync_log(sync_type:, vehicle_id:)
-      TelemetrySyncLog.create!(
-        telemetry_credential_id: credential.id,
-        vehicle_id: vehicle_id,
-        sync_type: sync_type,
-        status: "pending",
-        started_at: Time.current
-      )
+# app/services/integrations/normalizers/normalize_data_service.rb
+module Integrations
+  module Normalizers
+    class NormalizeDataService
+      def initialize(execution, config)
+        @execution = execution
+        @config = config
+        @feature_key = execution.feature_key
+      end
+
+      def call
+        # PASO 1: Obtener registros RAW pendientes de normalizar
+        pending_records = @execution.integration_raw_data.pending
+
+        if pending_records.empty?
+          return ServiceResult.success(
+            data: { processed: 0, failed: 0 },
+            message: "No hay registros pendientes de normalizar"
+          )
+        end
+
+        Rails.logger.info("→ Normalizando #{pending_records.count} registros...")
+
+        # PASO 2: Obtener el normalizador apropiado
+        normalizer = get_normalizer
+
+        # PASO 3: Procesar cada registro
+        stats = process_records(pending_records, normalizer)
+
+        # PASO 4: Retornar resultado
+        ServiceResult.success(
+          data: stats,
+          message: "#{stats[:processed]} registros normalizados"
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error en NormalizeDataService: #{e.message}")
+        ServiceResult.failure(errors: [ e.message ])
+      end
+
+      private
+
+      # ========================================================================
+      # OBTENER NORMALIZADOR
+      # ========================================================================
+
+      def get_normalizer
+        Factories::NormalizerFactory.build(
+          @config.integration_provider.slug,
+          @feature_key
+        )
+      end
+
+      # ========================================================================
+      # PROCESAR REGISTROS
+      # ========================================================================
+
+      def process_records(pending_records, normalizer)
+        processed = 0
+        failed = 0
+
+        pending_records.each do |raw_data|
+          begin
+            # Normalizar el registro
+            result = normalizer.normalize(raw_data, @config)
+
+            if result.success?
+              # Éxito: marcar como normalizado y asociar al registro final
+              raw_data.mark_as_normalized!(result.data)
+              processed += 1
+              Rails.logger.debug("  ✓ Normalizado: #{raw_data.external_id}")
+            else
+              # Fallo: marcar como fallido con el error
+              error_message = result.errors.join(", ")
+              raw_data.mark_as_failed!(error_message)
+              failed += 1
+              Rails.logger.warn("  ✗ Falló: #{raw_data.external_id} - #{error_message}")
+            end
+
+          rescue StandardError => e
+            # Error inesperado: marcar como fallido
+            raw_data.mark_as_failed!("Error inesperado: #{e.message}")
+            failed += 1
+            Rails.logger.error("  ✗ Error: #{raw_data.external_id} - #{e.message}")
+          end
+        end
+
+        Rails.logger.info("✓ Normalización completada:")
+        Rails.logger.info("  - Procesados: #{processed}")
+        Rails.logger.info("  - Fallidos: #{failed}")
+
+        { processed: processed, failed: failed }
+      end
     end
+  end
+end
 
-    def complete_sync_log(status:, started_at:, error: nil)
-      @sync_log.update!(
-        status: status,
-        records_processed: @stats[:processed],
-        records_created: @stats[:created],
-        records_updated: @stats[:updated],
-        records_skipped: @stats[:skipped],
-        error_message: error&.message,
-        error_details: error ? { backtrace: error.backtrace.first(5) } : {},
-        completed_at: Time.current
-      )
+# app/services/integrations/sync/fetch_raw_data_service.rb
+module Integrations
+  module Sync
+    class FetchRawDataService
+      def initialize(execution, config, session_id, feature_key, date_range)
+        @execution = execution
+        @config = config
+        @session_id = session_id
+        @feature_key = feature_key
+        @date_range = date_range
+        @provider = config.integration_provider
+      end
+
+      def call
+        # PASO 1: Obtener el conector apropiado
+        connector = get_connector
+
+        # PASO 2: Llamar al método fetch del conector según la feature
+        raw_response = fetch_from_provider(connector)
+
+        # PASO 3: Guardar cada registro en integration_raw_data
+        result = save_raw_data(raw_response)
+
+        ServiceResult.success(
+          data: result,
+          message: "#{result[:records_created]} registros obtenidos"
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error en FetchRawDataService: #{e.message}")
+        ServiceResult.failure(errors: [ e.message ])
+      end
+
+      private
+
+      # ========================================================================
+      # OBTENER CONECTOR
+      # ========================================================================
+
+      def get_connector
+        Factories::ConnectorFactory.build(@provider.slug)
+      end
+
+      # ========================================================================
+      # LLAMAR API DEL PROVEEDOR
+      # ========================================================================
+
+      def fetch_from_provider(connector)
+        # Según la feature, llamar al método correspondiente del conector
+        case @feature_key
+        when "fuel"
+          connector.fetch_refuelings(@session_id, @date_range[:from], @date_range[:to])
+        when "battery"
+          connector.fetch_electric_charges(@session_id, @date_range[:from], @date_range[:to])
+        when "trips"
+          connector.fetch_trips(@session_id, @date_range[:from], @date_range[:to])
+        else
+          raise ArgumentError, "Feature no soportada: #{@feature_key}"
+        end
+      end
+
+      # ========================================================================
+      # GUARDAR DATOS RAW EN BD
+      # ========================================================================
+
+      def save_raw_data(raw_response)
+        records_created = 0
+        duplicates_count = 0
+        errors = []
+
+        # raw_response es un Array de Hashes
+        # Ejemplo: [{ id: 'abc123', volume: 57.3, ... }, { id: 'def456', ... }]
+
+        raw_response.each do |record|
+          begin
+            # Extraer el ID único del registro del proveedor
+            external_id = extract_external_id(record)
+
+            # Intentar crear el registro RAW
+            raw_data = create_raw_data_record(external_id, record)
+
+            if raw_data.duplicate?
+              duplicates_count += 1
+              Rails.logger.debug("  ⊘ Duplicado: #{external_id}")
+            else
+              records_created += 1
+              Rails.logger.debug("  ✓ Guardado: #{external_id}")
+            end
+
+          rescue StandardError => e
+            # Si falla al guardar un registro individual, continuamos con los demás
+            errors << "Error al guardar registro: #{e.message}"
+            Rails.logger.error("Error al guardar registro: #{e.message}")
+          end
+        end
+
+        # Logear resumen
+        Rails.logger.info("→ Datos RAW guardados:")
+        Rails.logger.info("  - Nuevos: #{records_created}")
+        Rails.logger.info("  - Duplicados: #{duplicates_count}")
+        Rails.logger.info("  - Errores: #{errors.count}")
+
+        {
+          records_created: records_created,
+          duplicates_count: duplicates_count,
+          errors_count: errors.count,
+          errors: errors
+        }
+      end
+
+      # ========================================================================
+      # CREAR REGISTRO RAW DATA
+      # ========================================================================
+
+      def create_raw_data_record(external_id, record)
+        # Usar el método especial que detecta duplicados automáticamente
+        IntegrationRawData.create_or_mark_duplicate(
+          integration_sync_execution: @execution,
+          tenant_integration_configuration: @config,
+          provider_slug: @provider.slug,
+          feature_key: @feature_key,
+          external_id: external_id,
+          raw_data: record,
+          processing_status: "pending"
+        )
+      end
+
+      # ========================================================================
+      # EXTRAER EXTERNAL_ID DEL REGISTRO
+      # ========================================================================
+
+      def extract_external_id(record)
+        # El external_id es el campo 'id' en la respuesta del proveedor
+        # Ejemplo Geotab: { "id": "a8LfU7K7fpkOFf7XOZw-uCg", ... }
+        record["id"] || record[:id] || raise("Registro sin ID: #{record}")
+      end
     end
+  end
+end
 
-    def log_error(raw_data:, error_type:, error_message:)
-      @stats[:errors] << {
-        error_type: error_type,
-        error_message: error_message,
-        raw_data: raw_data
-      }
+# app/services/integrations/sync/sync_execution_service.rb
+module Integrations
+  module Sync
+    class SyncExecutionService
+      # Inicializa el servicio con:
+      # - config: TenantIntegrationConfiguration (configuración activa del tenant)
+      # - feature_key: String ('fuel', 'battery', etc.)
+      # - manual: Boolean (si es manual o programada)
+      def initialize(config, feature_key, manual: true)
+        @config = config
+        @feature_key = feature_key
+        @trigger_type = manual ? "manual" : "scheduled"
+        @execution = nil
+        @session_id = nil
+      end
 
-      TelemetryNormalizationError.create!(
-        telemetry_sync_log_id: @sync_log.id,
-        error_type: error_type,
-        error_message: error_message,
-        raw_data: raw_data,
-        provider_name: credential.provider_name,
-        data_type: @sync_log.sync_type
-      )
+      def call
+        # PASO 1: Validaciones previas
+        return validation_error unless valid_configuration?
+
+        # PASO 2: Crear registro de ejecución
+        create_execution_record
+
+        # PASO 3: Ejecutar sincronización (en bloque begin/rescue para capturar errores)
+        begin
+          execute_sync_process
+
+          # PASO 4: Marcar como completada
+          complete_execution
+
+          # PASO 5: Actualizar configuración
+          update_configuration_status
+
+          # Retornar resultado exitoso
+          ServiceResult.success(
+            data: build_success_response,
+            message: "Sincronización completada exitosamente"
+          )
+
+        rescue StandardError => e
+          # Si algo falla, marcar ejecución como fallida y retornar error
+          handle_execution_error(e)
+          ServiceResult.failure(
+            errors: [ e.message ],
+            data: { execution_id: @execution&.id }
+          )
+        end
+      end
+
+      private
+
+      # ========================================================================
+      # VALIDACIONES
+      # ========================================================================
+
+      def valid_configuration?
+        # Verificar que la configuración esté activa
+        return false unless @config.is_active
+
+        # Verificar que la feature esté habilitada
+        return false unless @config.enabled_features.include?(@feature_key)
+
+        # Verificar que tenga credenciales
+        return false unless @config.credentials.present?
+
+        true
+      end
+
+      def validation_error
+        errors = []
+        errors << "Configuración no activa" unless @config.is_active
+        errors << "Feature '#{@feature_key}' no habilitada" unless @config.enabled_features.include?(@feature_key)
+        errors << "Credenciales no configuradas" unless @config.credentials.present?
+
+        ServiceResult.failure(errors: errors)
+      end
+
+      # ========================================================================
+      # CREAR REGISTRO DE EJECUCIÓN
+      # ========================================================================
+
+      def create_execution_record
+        @execution = @config.integration_sync_executions.create!(
+          feature_key: @feature_key,
+          trigger_type: @trigger_type,
+          status: "running",
+          started_at: Time.current,
+          metadata: {
+            date_range: calculate_date_range,
+            provider_slug: @config.integration_provider.slug
+          }
+        )
+
+        Rails.logger.info("✓ Ejecución ##{@execution.id} creada (#{@feature_key})")
+      end
+
+      # ========================================================================
+      # PROCESO DE SINCRONIZACIÓN
+      # ========================================================================
+
+      def execute_sync_process
+        # PASO 1: Autenticar con el proveedor
+        authenticate
+
+        # PASO 2: Obtener datos RAW del proveedor
+        fetch_raw_data
+
+        # PASO 3: Normalizar datos
+        normalize_data
+      end
+
+      # ------------------------------------------------------------------------
+      # PASO 1: AUTENTICACIÓN
+      # ------------------------------------------------------------------------
+
+      def authenticate
+        Rails.logger.info("→ Autenticando con #{@config.integration_provider.name}...")
+
+        # Delegar autenticación al servicio especializado
+        auth_result = Authentication::AuthenticateService.new(@config).call
+
+        if auth_result.failure?
+          raise "Error de autenticación: #{auth_result.errors.join(', ')}"
+        end
+
+        @session_id = auth_result.data[:session_id]
+        Rails.logger.info("✓ Autenticación exitosa (session: #{@session_id[0..10]}...)")
+      end
+
+      # ------------------------------------------------------------------------
+      # PASO 2: OBTENER DATOS RAW
+      # ------------------------------------------------------------------------
+
+      def fetch_raw_data
+        Rails.logger.info("→ Obteniendo datos RAW de #{@feature_key}...")
+
+        # Delegar fetch al servicio especializado
+        date_range = calculate_date_range
+        fetch_result = FetchRawDataService.new(
+          @execution,
+          @config,
+          @session_id,
+          @feature_key,
+          date_range
+        ).call
+
+        if fetch_result.failure?
+          raise "Error al obtener datos: #{fetch_result.errors.join(', ')}"
+        end
+
+        records_count = fetch_result.data[:records_created]
+        duplicates_count = fetch_result.data[:duplicates_count]
+
+        Rails.logger.info("✓ #{records_count} registros RAW obtenidos (#{duplicates_count} duplicados omitidos)")
+      end
+
+      # ------------------------------------------------------------------------
+      # PASO 3: NORMALIZAR DATOS
+      # ------------------------------------------------------------------------
+
+      def normalize_data
+        Rails.logger.info("→ Normalizando datos...")
+
+        # Delegar normalización al servicio especializado
+        normalize_result = Normalizers::NormalizeDataService.new(
+          @execution,
+          @config
+        ).call
+
+        if normalize_result.failure?
+          # La normalización puede tener errores parciales, no fallamos totalmente
+          Rails.logger.warn("⚠ Normalización con errores: #{normalize_result.errors.join(', ')}")
+        end
+
+        stats = normalize_result.data
+        Rails.logger.info("✓ Normalización completada:")
+        Rails.logger.info("  - Procesados: #{stats[:processed]}")
+        Rails.logger.info("  - Fallidos: #{stats[:failed]}")
+      end
+
+      # ========================================================================
+      # COMPLETAR EJECUCIÓN
+      # ========================================================================
+
+      def complete_execution
+        # Obtener estadísticas de los registros RAW
+        stats = calculate_statistics
+
+        # Actualizar ejecución con estadísticas finales
+        @execution.update!(
+          status: "completed",
+          finished_at: Time.current,
+          duration_seconds: (Time.current - @execution.started_at).to_i,
+          records_fetched: stats[:fetched],
+          records_processed: stats[:processed],
+          records_failed: stats[:failed],
+          records_skipped: stats[:skipped]
+        )
+
+        Rails.logger.info("✅ Ejecución ##{@execution.id} completada (#{@execution.duration_seconds}s)")
+      end
+
+      def calculate_statistics
+        raw_data = @execution.integration_raw_data
+
+        {
+          fetched: raw_data.count,
+          processed: raw_data.normalized.count,
+          failed: raw_data.failed.count,
+          skipped: raw_data.duplicate.count
+        }
+      end
+
+      # ========================================================================
+      # ACTUALIZAR CONFIGURACIÓN
+      # ========================================================================
+
+      def update_configuration_status
+        @config.update!(
+          last_sync_at: Time.current,
+          last_sync_status: "success",
+          last_sync_error: nil
+        )
+      end
+
+      # ========================================================================
+      # MANEJO DE ERRORES
+      # ========================================================================
+
+      def handle_execution_error(error)
+        Rails.logger.error("❌ Error en ejecución ##{@execution&.id}: #{error.message}")
+        Rails.logger.error(error.backtrace.join("\n"))
+
+        if @execution
+          @execution.update!(
+            status: "failed",
+            finished_at: Time.current,
+            duration_seconds: (Time.current - @execution.started_at).to_i,
+            error_message: error.message
+          )
+        end
+
+        @config.update!(
+          last_sync_at: Time.current,
+          last_sync_status: "error",
+          last_sync_error: error.message
+        )
+      end
+
+      # ========================================================================
+      # UTILIDADES
+      # ========================================================================
+
+      def calculate_date_range
+        # Por defecto: desde última sync exitosa o 30 días atrás
+        from_date = @config.last_sync_at || 30.days.ago
+        to_date = Time.current
+
+        { from: from_date, to: to_date }
+      end
+
+      def build_success_response
+        {
+          execution_id: @execution.id,
+          feature_key: @feature_key,
+          records_fetched: @execution.records_fetched,
+          records_processed: @execution.records_processed,
+          records_failed: @execution.records_failed,
+          records_skipped: @execution.records_skipped,
+          duration_seconds: @execution.duration_seconds,
+          started_at: @execution.started_at,
+          finished_at: @execution.finished_at,
+          success_rate: @execution.success_rate,
+          warnings: build_warnings
+        }
+      end
+
+      def build_warnings
+        warnings = []
+        warnings << "#{@execution.records_failed} registros fallaron al normalizar" if @execution.records_failed > 0
+        warnings << "#{@execution.records_skipped} registros duplicados omitidos" if @execution.records_skipped > 0
+        warnings
+      end
     end
+  end
+end
 
-    def build_result(success:, error: nil)
-      {
-        success: success,
-        sync_log_id: @sync_log.id,
-        stats: {
-          processed: @stats[:processed],
-          created: @stats[:created],
-          updated: @stats[:updated],
-          skipped: @stats[:skipped],
-          error_count: @stats[:errors].count
-        },
-        error: error
-      }
+# app/services/integrations/tenant_configurations/activate_service.rb
+module Integrations
+  module TenantConfigurations
+    class ActivateService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        # Validar que tenga credenciales
+        unless @config.credentials.present?
+          return ServiceResult.failure(
+            errors: [ "Debe configurar las credenciales antes de activar" ]
+          )
+        end
+
+        # Validar que tenga al menos una feature habilitada
+        unless @config.enabled_features.any?
+          return ServiceResult.failure(
+            errors: [ "Debe seleccionar al menos una funcionalidad a sincronizar" ]
+          )
+        end
+
+        if @config.activate!
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración activada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al activar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al activar la configuración" ])
+      end
     end
+  end
+end
+
+# app/services/integrations/tenant_configurations/create_service.rb
+module Integrations
+  module TenantConfigurations
+    class CreateService
+      def initialize(tenant, params)
+        @tenant = tenant
+        @params = params
+      end
+
+      def call
+        # Verificar que el proveedor existe y está disponible
+        provider = IntegrationProvider.for_marketplace.find_by(id: @params[:integration_provider_id])
+        unless provider
+          return ServiceResult.failure(errors: [ "Proveedor no encontrado o no disponible" ])
+        end
+
+        # Verificar que no exista ya una configuración para este proveedor
+        existing = @tenant.tenant_integration_configurations
+          .find_by(integration_provider_id: provider.id)
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "Ya existe una configuración para este proveedor" ]
+          )
+        end
+
+        # Crear configuración
+        config = @tenant.tenant_integration_configurations.build(
+          integration_provider: provider,
+          credentials: @params[:credentials],
+          enabled_features: @params[:enabled_features] || [],
+          sync_frequency: @params[:sync_frequency] || "daily",
+          sync_hour: @params[:sync_hour] || 2,
+          sync_day_of_week: @params[:sync_day_of_week],
+          sync_day_of_month: @params[:sync_day_of_month],
+          sync_config: @params[:sync_config] || {},
+          is_active: false # Inicia inactiva hasta que se valide
+        )
+
+        if config.save
+          ServiceResult.success(
+            data: config,
+            message: "Configuración creada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al crear configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al crear la configuración" ])
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/deactivate_service.rb
+module Integrations
+  module TenantConfigurations
+    class DeactivateService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        if @config.deactivate!
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración desactivada. Los datos históricos se mantienen."
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al desactivar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al desactivar la configuración" ])
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/destroy_service.rb
+module Integrations
+  module TenantConfigurations
+    class DestroyService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        # Validar que esté inactiva antes de eliminar
+        if @config.is_active
+          return ServiceResult.failure(
+            errors: [ "Debe desactivar la configuración antes de eliminarla" ]
+          )
+        end
+
+        if @config.destroy
+          ServiceResult.success(message: "Configuración eliminada exitosamente")
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al eliminar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al eliminar la configuración" ])
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/test_connection_service.rb
+module Integrations
+  module TenantConfigurations
+    class TestConnectionService
+      def initialize(provider_id, credentials)
+        @provider_id = provider_id
+        @credentials = credentials
+      end
+
+      def call
+        provider = IntegrationProvider.find(@provider_id)
+
+        # Validar estructura de credenciales
+        validation_result = validate_credentials_structure(provider, @credentials)
+        return validation_result unless validation_result.success?
+
+        # Obtener el conector apropiado
+        connector = get_connector(provider.slug)
+
+        # Probar conexión
+        result = connector.test_connection(@credentials)
+
+        if result[:success]
+          ServiceResult.success(
+            data: {
+              success: true,
+              message: "Conexión establecida exitosamente",
+              provider_name: provider.name,
+              details: result[:details]
+            }
+          )
+        else
+          ServiceResult.failure(
+            errors: [ result[:error] || "Error al conectar con el proveedor" ]
+          )
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al probar conexión: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al probar conexión: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_credentials_structure(provider, credentials)
+        schema = provider.integration_auth_schema
+        return ServiceResult.failure(errors: [ "Proveedor sin schema de autenticación" ]) unless schema
+
+        required_fields = schema.required_fields.map { |f| f["name"] }
+        missing_fields = required_fields - credentials.keys.map(&:to_s)
+
+        if missing_fields.any?
+          return ServiceResult.failure(
+            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+
+      def get_connector(provider_slug)
+        # Factory pattern para obtener el conector correcto
+        # Por ahora retornamos un mock connector
+        # En Fase 3 se implementarán los conectores reales
+        case provider_slug
+        when "geotab"
+          Integrations::Connectors::GeotabConnector.new
+        when "verizon_connect"
+          Integrations::Connectors::VerizonConnector.new
+        when "tomtom_telematics"
+          Integrations::Connectors::TomtomConnector.new
+        else
+          Integrations::Connectors::MockConnector.new
+        end
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/update_credentials_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateCredentialsService
+      def initialize(config, new_credentials, test_connection: false)
+        @config = config
+        @new_credentials = new_credentials
+        @test_connection = test_connection
+        @was_active = config.is_active
+      end
+
+      def call
+        # PASO 1: Validar estructura de credenciales
+        validation = validate_credentials_structure
+        return validation if validation.failure?
+
+        # PASO 2: Si está activa, desactivar temporalmente
+        @config.update!(is_active: false) if @was_active
+
+        # PASO 3: Actualizar credenciales
+        unless @config.update(credentials: @new_credentials)
+          return ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+        # PASO 4: Limpiar estado de última sync
+        @config.update!(last_sync_status: nil, last_sync_error: nil)
+
+        # PASO 5: Probar conexión si se solicita
+        if @test_connection
+          test_result = test_new_connection
+          return test_result if test_result.failure?
+        end
+
+        # PASO 6: Re-activar si estaba activa
+        @config.update!(is_active: true) if @was_active
+
+        ServiceResult.success(
+          data: @config,
+          message: "Credenciales actualizadas exitosamente"
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar credenciales: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar credenciales: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_credentials_structure
+        schema = @config.integration_provider.integration_auth_schema
+        return ServiceResult.failure(errors: [ "Proveedor sin schema de autenticación" ]) unless schema
+
+        required_fields = schema.required_fields.map { |f| f["name"] }
+        missing_fields = required_fields - @new_credentials.keys.map(&:to_s)
+
+        if missing_fields.any?
+          return ServiceResult.failure(
+            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+
+      def test_new_connection
+        result = TestConnectionService.new(
+          @config.integration_provider.id,
+          @new_credentials
+        ).call
+
+        unless result.success?
+          return ServiceResult.failure(
+            errors: [ "Test de conexión falló: #{result.errors.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/update_features_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateFeaturesService
+      def initialize(config, enabled_features)
+        @config = config
+        @enabled_features = enabled_features
+      end
+
+      def call
+        # PASO 1: Validar que las features existan
+        validation = validate_features
+        return validation if validation.failure?
+
+        # PASO 2: Actualizar features
+        if @config.update(enabled_features: @enabled_features)
+          ServiceResult.success(
+            data: @config,
+            message: "Features actualizadas exitosamente"
+          )
+        else
+          ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar features: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar features: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_features
+        unless @enabled_features.is_a?(Array)
+          return ServiceResult.failure(
+            errors: [ "enabled_features debe ser un array" ]
+          )
+        end
+
+        available_features = @config.integration_provider.integration_features.active.pluck(:feature_key)
+        invalid_features = @enabled_features - available_features
+
+        if invalid_features.any?
+          return ServiceResult.failure(
+            errors: [ "Features no disponibles: #{invalid_features.join(', ')}" ],
+            data: { available_features: available_features }
+          )
+        end
+
+        ServiceResult.success
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/update_schedule_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateScheduleService
+      def initialize(config, schedule_params)
+        @config = config
+        @schedule_params = schedule_params
+      end
+
+      def call
+        # PASO 1: Validar parámetros de programación
+        validation = validate_schedule_params
+        return validation if validation.failure?
+
+        # PASO 2: Actualizar programación
+        if @config.update(@schedule_params)
+          ServiceResult.success(
+            data: @config,
+            message: "Programación actualizada exitosamente"
+          )
+        else
+          ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar programación: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar programación: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_schedule_params
+        # Validar frecuencia
+        unless %w[daily weekly monthly].include?(@schedule_params[:sync_frequency])
+          return ServiceResult.failure(
+            errors: [ "Frecuencia no válida: #{@schedule_params[:sync_frequency]}" ]
+          )
+        end
+
+        # Validar hora
+        hour = @schedule_params[:sync_hour]
+        unless hour.is_a?(Integer) && hour >= 0 && hour <= 23
+          return ServiceResult.failure(
+            errors: [ "Hora no válida: #{hour}" ]
+          )
+        end
+
+        # Para POC, no validamos estrictamente day_of_week y day_of_month
+        # En producción se validarían según la frecuencia
+
+        ServiceResult.success
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/update_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateService
+      def initialize(config, params)
+        @config = config
+        @params = params
+      end
+
+      def call
+        # Si se actualizan credenciales, marcar para revalidación
+        if @params.key?(:credentials) && @params[:credentials] != @config.credentials
+          @params[:last_sync_status] = nil
+          @params[:last_sync_error] = nil
+        end
+
+        if @config.update(@params)
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración actualizada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al actualizar la configuración" ])
+      end
+    end
+  end
+end
+
+# app/services/integrations/vehicle_mappings/create_mapping_service.rb
+module Integrations
+  module VehicleMappings
+    class CreateMappingService
+      def initialize(config, vehicle, external_vehicle_id, external_vehicle_name = nil)
+        @config = config
+        @vehicle = vehicle
+        @external_vehicle_id = external_vehicle_id
+        @external_vehicle_name = external_vehicle_name
+      end
+
+      def call
+        # Verificar si ya existe mapeo para este external_vehicle_id
+        existing = @config.vehicle_provider_mappings.find_by(
+          external_vehicle_id: @external_vehicle_id
+        )
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "El vehículo externo '#{@external_vehicle_id}' ya está mapeado" ]
+          )
+        end
+
+        # Crear mapeo
+        mapping = @config.vehicle_provider_mappings.build(
+          vehicle: @vehicle,
+          external_vehicle_id: @external_vehicle_id,
+          external_vehicle_name: @external_vehicle_name,
+          is_active: true,
+          mapped_at: Time.current
+        )
+
+        if mapping.save
+          ServiceResult.success(
+            data: mapping,
+            message: "Mapeo creado exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: mapping.errors.full_messages)
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al crear mapeo: #{e.message}")
+        ServiceResult.failure(errors: [ e.message ])
+      end
+    end
+  end
+end
+
+# app/services/service_result.rb
+class ServiceResult
+  attr_reader :success, :data, :errors, :message
+
+  def initialize(success:, data: nil, errors: [], message: nil)
+    @success = success
+    @data = data
+    @errors = errors
+    @message = message
+  end
+
+  def self.success(data: nil, message: nil)
+    new(success: true, data: data, message: message)
+  end
+
+  def self.failure(errors: [], message: nil)
+    new(success: false, errors: errors, message: message)
+  end
+
+  def success?
+    @success
+  end
+
+  def failure?
+    !@success
   end
 end

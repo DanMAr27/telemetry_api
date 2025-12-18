@@ -2,97 +2,233 @@
 module V1
   class MarketplaceApi < Grape::API
     resource :marketplace do
-      # ========================================================================
-      # GET /api/v1/marketplace
-      # Listar todas las categorías con sus proveedores
-      # ========================================================================
-      desc "Listar todas las categorías con sus proveedores disponibles"
+      desc "Obtener marketplace de integraciones (categorías y proveedores)" do
+        detail "Endpoint flexible que retorna el marketplace completo o filtrado según parámetros"
+      end
+      params do
+        # Filtros de visualización
+        optional :view, type: String,
+                 values: %w[grouped flat category_detail],
+                 default: "grouped",
+                 desc: "Modo de visualización: grouped (categorías), flat (lista), category_detail (una categoría)"
+
+        # Filtros de categoría
+        optional :category_slug, type: String,
+                 desc: "Filtrar por slug de categoría (ej: telemetry)"
+
+        # Filtros de proveedores
+        optional :provider_status, type: String,
+                 values: %w[active beta coming_soon],
+                 desc: "Filtrar proveedores por estado"
+
+        optional :is_premium, type: Boolean,
+                 desc: "Filtrar solo proveedores premium (true) o gratuitos (false)"
+
+        optional :search, type: String,
+                 desc: "Buscar por nombre de proveedor o categoría"
+
+        # Opciones de inclusión
+        optional :include_features, type: Boolean,
+                 default: true,
+                 desc: "Incluir features de cada proveedor"
+
+        optional :include_auth_info, type: Boolean,
+                 default: false,
+                 desc: "Incluir información de autenticación"
+
+        optional :include_stats, type: Boolean,
+                 default: false,
+                 desc: "Incluir estadísticas de uso"
+      end
       get do
-        result = Integrations::Marketplace::ListCategoriesService.new.call
-
-        if result.success?
-          present result.data, with: Entities::MarketplaceCategoryEntity
-        else
-          error!({
-            error: "internal_error",
-            message: result.errors.join(", ")
-          }, 500)
-        end
-      end
-
-      # ========================================================================
-      # GET /api/v1/marketplace/categories/:slug
-      # Obtener una categoría específica con sus proveedores
-      # ========================================================================
-      desc "Obtener detalles de una categoría específica"
-      params do
-        requires :slug, type: String, desc: "Slug de la categoría"
-      end
-      get "categories/:slug" do
-        result = Integrations::Marketplace::GetCategoryService.new(params[:slug]).call
-
-        if result.success?
-          present result.data, with: Entities::MarketplaceCategoryEntity
-        else
-          error!({
-            error: "not_found",
-            message: result.errors.join(", ")
-          }, 404)
-        end
-      end
-
-      # ========================================================================
-      # GET /api/v1/marketplace/providers
-      # Listar todos los proveedores (con filtros opcionales)
-      # ========================================================================
-      desc "Listar todos los proveedores disponibles"
-      params do
-        optional :category_slug, type: String, desc: "Filtrar por categoría"
-        optional :is_premium, type: Boolean, desc: "Filtrar por premium"
-        optional :status, type: String, values: %w[active beta], desc: "Filtrar por estado"
-      end
-      get "providers" do
-        filters = {
+        result = Integrations::Marketplace::UnifiedMarketplaceService.new(
+          view: params[:view],
           category_slug: params[:category_slug],
+          provider_status: params[:provider_status],
           is_premium: params[:is_premium],
-          status: params[:status]
-        }.compact
-
-        result = Integrations::Marketplace::ListProvidersService.new(filters).call
+          search: params[:search],
+          include_features: params[:include_features],
+          include_auth_info: params[:include_auth_info],
+          include_stats: params[:include_stats]
+        ).call
 
         if result.success?
-          present result.data, with: Entities::MarketplaceProviderEntity, include_auth: true
+          # Adaptar la respuesta según el view mode
+          case params[:view]
+          when "grouped"
+            present result.data[:categories],
+                    with: Entities::MarketplaceCategoryEntity,
+                    include_features: params[:include_features],
+                    include_auth_info: params[:include_auth_info]
+
+          when "flat"
+            present result.data[:providers],
+                    with: Entities::MarketplaceProviderEntity,
+                    include_features: params[:include_features],
+                    include_auth_info: params[:include_auth_info],
+                    include_stats: params[:include_stats]
+
+          when "category_detail"
+            present result.data[:category],
+                    with: Entities::MarketplaceCategoryEntity,
+                    include_features: params[:include_features],
+                    include_auth_info: params[:include_auth_info]
+          end
         else
           error!({
-            error: "internal_error",
+            error: "marketplace_error",
             message: result.errors.join(", ")
           }, 500)
         end
       end
 
-      # ========================================================================
-      # GET /api/v1/marketplace/providers/:slug
-      # Obtener detalles de un proveedor específico
-      # ========================================================================
-      desc "Obtener detalles de un proveedor específico"
+      desc "Obtener detalle completo de un proveedor específico"
       params do
         requires :slug, type: String, desc: "Slug del proveedor (ej: geotab)"
+        optional :include_category, type: Boolean, default: true
+        optional :include_features, type: Boolean, default: true
+        optional :include_auth_info, type: Boolean, default: true
+        optional :include_stats, type: Boolean, default: true
       end
       get "providers/:slug" do
-        result = Integrations::Marketplace::GetProviderService.new(params[:slug]).call
+        provider = IntegrationProvider
+          .for_marketplace
+          .includes(:integration_category, :integration_features, :integration_auth_schema)
+          .find_by!(slug: params[:slug])
+
+        present provider,
+                with: Entities::MarketplaceProviderEntity,
+                include_category: params[:include_category],
+                include_features: params[:include_features],
+                include_auth_info: params[:include_auth_info],
+                include_stats: params[:include_stats]
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener formulario completo para configurar un proveedor"
+      params do
+        requires :slug, type: String, desc: "Slug del proveedor"
+      end
+      get "providers/:slug/configuration_form" do
+        provider = IntegrationProvider
+          .for_marketplace
+          .includes(:integration_features, :integration_auth_schema)
+          .find_by!(slug: params[:slug])
+
+        unless provider.integration_auth_schema&.is_active
+          error!({
+            error: "configuration_unavailable",
+            message: "Este proveedor no tiene configuración de autenticación disponible"
+          }, 422)
+        end
+
+        present provider, with: Entities::ConfigurationFormEntity
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener lista de empresas/tenants disponibles"
+      params do
+        optional :exclude_configured_for, type: String,
+                 desc: "Excluir tenants que ya tienen este proveedor configurado"
+      end
+      get "available_tenants" do
+        tenants = Tenant.active.order(:name)
+
+        if params[:exclude_configured_for].present?
+          provider = IntegrationProvider.find_by(slug: params[:exclude_configured_for])
+
+          if provider
+            configured_tenant_ids = TenantIntegrationConfiguration
+              .where(integration_provider: provider)
+              .pluck(:tenant_id)
+
+            tenants = tenants.where.not(id: configured_tenant_ids)
+          end
+        end
+
+        present tenants, with: Entities::TenantSummaryEntity
+      end
+
+      desc "Configurar una integración desde el marketplace"
+      params do
+        requires :tenant_id, type: Integer
+        requires :provider_slug, type: String
+        requires :credentials, type: Hash
+        requires :enabled_features, type: Array[String]
+        optional :sync_frequency, type: String, values: %w[daily weekly monthly], default: "daily"
+        optional :sync_hour, type: Integer, values: 0..23, default: 2
+        optional :sync_day_of_week, type: Integer, values: 0..6
+        optional :sync_day_of_month, type: String, values: %w[start end]
+        optional :test_connection_first, type: Boolean, default: false
+        optional :activate_immediately, type: Boolean, default: false
+      end
+      post "setup" do
+        tenant = Tenant.find(params[:tenant_id])
+
+        result = Integrations::Marketplace::SetupIntegrationService.new(
+          tenant,
+          params[:provider_slug],
+          declared(params, include_missing: false).except(:tenant_id, :provider_slug)
+        ).call
 
         if result.success?
-          present result.data, with: Entities::MarketplaceProviderEntity, include_auth: true
+          present result.data,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true,
+                  include_provider: true,
+                  include_features: true
         else
           error!({
-            error: "not_found",
+            error: "setup_failed",
             message: result.errors.join(", ")
-          }, 404)
+          }, 422)
         end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "tenant_not_found",
+          message: "Empresa/Tenant no encontrada"
+        }, 404)
+      end
+
+      desc "Probar conexión con un proveedor sin crear configuración"
+      params do
+        requires :provider_slug, type: String
+        requires :credentials, type: Hash
+      end
+      post "test_connection" do
+        provider = IntegrationProvider.for_marketplace.find_by!(slug: params[:provider_slug])
+
+        result = Integrations::TenantConfigurations::TestConnectionService.new(
+          provider.id,
+          params[:credentials]
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::ConnectionTestResultEntity
+        else
+          error!({
+            error: "connection_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "provider_not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
       end
     end
   end
 end
+
 # app/api/v1/sync_executions.rb
 module V1
   class SyncExecutionsApi < Grape::API
@@ -106,10 +242,6 @@ module V1
       route_param :tenant_id do
         resource :integration_configurations do
           route_param :config_id do
-            # ==========================================================
-            # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync
-            # Ejecutar sincronización MANUALMENTE
-            # ==========================================================
             desc "Ejecutar sincronización manual"
             params do
               requires :feature_key, type: String,
@@ -136,11 +268,6 @@ module V1
                 }, 422)
               end
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_executions
-            # Listar ejecuciones de sincronización
-            # ==========================================================
             desc "Listar ejecuciones de sincronización"
             params do
               optional :feature_key, type: String
@@ -157,11 +284,6 @@ module V1
 
               present executions, with: Entities::IntegrationSyncExecutionSummaryEntity
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/sync_executions/:id
-            # Ver detalle de una ejecución
-            # ==========================================================
             desc "Ver detalle de una ejecución"
             params do
               requires :execution_id, type: Integer
@@ -174,11 +296,6 @@ module V1
                       with: Entities::IntegrationSyncExecutionEntity,
                       include_computed: true
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/raw_data
-            # Ver datos RAW (para debugging)
-            # ==========================================================
             desc "Ver datos RAW"
             params do
               optional :status, type: String, values: %w[pending normalized failed duplicate]
@@ -193,11 +310,6 @@ module V1
 
               present raw_data, with: Entities::IntegrationRawDataEntity
             end
-
-            # ==========================================================
-            # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/sync_statistics
-            # Estadísticas de sincronización
-            # ==========================================================
             desc "Estadísticas de sincronización"
             get "sync_statistics" do
               config = current_tenant.tenant_integration_configurations.find(params[:config_id])
@@ -226,282 +338,740 @@ module V1
     end
   end
 end
-# app/api/v1/tenant_integration_configurations.rb
+
+# app/api/v1/integration_configurations_api.rb (MEJORADA)
 module V1
-  class TenantIntegrationConfigurationsApi < Grape::API
-    # Helper para obtener tenant actual
-    helpers do
-      def current_tenant
-        @current_tenant ||= Tenant.find(params[:tenant_id])
+  class IntegrationConfigurationsApi < Grape::API
+    resource :integration_configurations do
+      desc "Listar configuraciones de integraciones"
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :provider_slug, type: String, desc: "Filtrar por proveedor"
+        optional :is_active, type: Boolean, desc: "Filtrar por estado activo"
+        optional :status, type: String, values: %w[success error], desc: "Filtrar por último estado de sync"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50, values: 1..100
       end
-    end
+      get do
+        configs = TenantIntegrationConfiguration.includes(:integration_provider, :tenant)
 
-    resource :tenants do
-      route_param :tenant_id do
-        resource :integration_configurations do
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations
-          # Listar todas las configuraciones del tenant
-          # ================================================================
-          desc "Listar configuraciones de integraciones del tenant"
-          params do
-            optional :include_provider, type: Boolean, default: false
-            optional :include_features, type: Boolean, default: false
-            optional :include_computed, type: Boolean, default: true
-            optional :active_only, type: Boolean, default: false
-          end
-          get do
-            configs = current_tenant.tenant_integration_configurations
-            configs = configs.active if params[:active_only]
-            configs = configs.includes(:integration_provider).order(created_at: :desc)
+        # Aplicar filtros
+        configs = configs.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+        configs = configs.where(is_active: params[:is_active]) unless params[:is_active].nil?
+        configs = configs.where(last_sync_status: params[:status]) if params[:status]
 
-            if params[:include_provider] || params[:include_features]
-              present configs,
-                      with: Entities::TenantIntegrationConfigurationEntity,
-                      include_provider: params[:include_provider],
-                      include_features: params[:include_features],
-                      include_computed: params[:include_computed]
-            else
-              present configs,
-                      with: Entities::TenantIntegrationConfigurationSummaryEntity
-            end
-          end
+        if params[:provider_slug]
+          configs = configs.joins(:integration_provider)
+            .where(integration_providers: { slug: params[:provider_slug] })
+        end
 
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Obtener detalle de una configuración
-          # ================================================================
-          desc "Obtener detalle de una configuración"
-          params do
-            requires :id, type: Integer
-            optional :include_features, type: Boolean, default: true
-            optional :include_computed, type: Boolean, default: true
-            optional :include_auth_info, type: Boolean, default: false
-          end
-          get ":id" do
-            config = current_tenant.tenant_integration_configurations.find(params[:id])
+        # Ordenar
+        configs = configs.order(created_at: :desc)
 
-            present config,
-                    with: Entities::TenantIntegrationConfigurationEntity,
-                    include_features: params[:include_features],
-                    include_computed: params[:include_computed],
-                    include_auth_info: params[:include_auth_info]
-          end
+        # Paginación
+        total = configs.count
+        configs = configs.offset((params[:page] - 1) * params[:per_page])
+                        .limit(params[:per_page])
 
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations
-          # Crear nueva configuración
-          # ================================================================
-          desc "Crear nueva configuración de integración"
-          params do
-            requires :integration_provider_id, type: Integer, desc: "ID del proveedor"
-            requires :credentials, type: Hash, desc: "Credenciales de autenticación" do
-              # Dinámico según el proveedor
-            end
-            optional :enabled_features, type: Array[String], default: [], desc: "Features a sincronizar"
-            optional :sync_frequency, type: String, values: %w[daily weekly monthly], default: "daily"
-            optional :sync_hour, type: Integer, values: 0..23, default: 2
-            optional :sync_day_of_week, type: Integer, values: 0..6, desc: "Solo para weekly"
-            optional :sync_day_of_month, type: String, values: %w[start end], desc: "Solo para monthly"
-            optional :sync_config, type: Hash, default: {}
-          end
-          post do
-            result = Integrations::TenantConfigurations::CreateService.new(
-              current_tenant,
-              declared(params, include_missing: false)
-            ).call
+        {
+          configurations: Entities::TenantIntegrationConfigurationSummaryEntity.represent(configs),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
 
-            if result.success?
-              present result.data,
-                      with: Entities::TenantIntegrationConfigurationEntity,
-                      include_computed: true
-            else
-              error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
-            end
-          end
+      desc "Obtener detalle completo de una configuración"
+      params do
+        requires :id, type: Integer
+      end
+      get ":id" do
+        config = TenantIntegrationConfiguration.find(params[:id])
 
-          # ================================================================
-          # PUT /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Actualizar configuración
-          # ================================================================
-          desc "Actualizar configuración de integración"
-          params do
-            requires :id, type: Integer
-            optional :credentials, type: Hash
-            optional :enabled_features, type: Array[String]
-            optional :sync_frequency, type: String, values: %w[daily weekly monthly]
-            optional :sync_hour, type: Integer, values: 0..23
-            optional :sync_day_of_week, type: Integer, values: 0..6
-            optional :sync_day_of_month, type: String, values: %w[start end]
-            optional :sync_config, type: Hash
-          end
-          put ":id" do
-            config = current_tenant.tenant_integration_configurations.find(params[:id])
-            result = Integrations::TenantConfigurations::UpdateService.new(
-              config,
-              declared(params, include_missing: false)
-            ).call
+        present config,
+                with: Entities::TenantIntegrationConfigurationEntity,
+                include_provider: true,
+                include_tenant: true,
+                include_features: true,
+                include_computed: true
+      end
 
-            if result.success?
-              present result.data,
-                      with: Entities::TenantIntegrationConfigurationEntity,
-                      include_computed: true
-            else
-              error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
-            end
-          end
+      # Bloque 1: Actualizar Credenciales
+      desc "Actualizar solo las credenciales de autenticación"
+      params do
+        requires :id, type: Integer
+        requires :credentials, type: Hash, desc: "Nuevas credenciales"
+        optional :test_connection_after, type: Boolean, default: false,
+                 desc: "Probar conexión después de actualizar"
+      end
+      put ":id/credentials" do
+        config = TenantIntegrationConfiguration.find(params[:id])
 
-          # ================================================================
-          # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:id
-          # Eliminar configuración
-          # ================================================================
-          desc "Eliminar configuración de integración"
-          params do
-            requires :id, type: Integer
-          end
-          delete ":id" do
-            config = current_tenant.tenant_integration_configurations.find(params[:id])
-            result = Integrations::TenantConfigurations::DestroyService.new(config).call
+        # Si está activa, desactivar temporalmente
+        was_active = config.is_active
+        config.update!(is_active: false) if was_active
 
-            if result.success?
-              { success: true, message: result.message }
-            else
-              error!({ error: "deletion_error", message: result.errors.join(", ") }, 422)
-            end
-          end
+        # Actualizar credenciales
+        if config.update(credentials: params[:credentials])
+          # Limpiar estado de última sincronización
+          config.update(last_sync_status: nil, last_sync_error: nil)
 
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/activate
-          # Activar configuración
-          # ================================================================
-          desc "Activar configuración"
-          params do
-            requires :id, type: Integer
-          end
-          post ":id/activate" do
-            config = current_tenant.tenant_integration_configurations.find(params[:id])
-            result = Integrations::TenantConfigurations::ActivateService.new(config).call
-
-            if result.success?
-              present result.data,
-                      with: Entities::TenantIntegrationConfigurationEntity,
-                      include_computed: true
-            else
-              error!({ error: "activation_error", message: result.errors.join(", ") }, 422)
-            end
-          end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/:id/deactivate
-          # Desactivar configuración
-          # ================================================================
-          desc "Desactivar configuración"
-          params do
-            requires :id, type: Integer
-          end
-          post ":id/deactivate" do
-            config = current_tenant.tenant_integration_configurations.find(params[:id])
-            result = Integrations::TenantConfigurations::DeactivateService.new(config).call
-
-            if result.success?
-              present result.data,
-                      with: Entities::TenantIntegrationConfigurationEntity,
-                      include_computed: true
-            else
-              error!({ error: "deactivation_error", message: result.errors.join(", ") }, 422)
-            end
-          end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/integration_configurations/test_connection
-          # Probar conexión (sin guardar)
-          # ================================================================
-          desc "Probar conexión con el proveedor"
-          params do
-            requires :integration_provider_id, type: Integer
-            requires :credentials, type: Hash
-          end
-          post "test_connection" do
-            result = Integrations::TenantConfigurations::TestConnectionService.new(
-              params[:integration_provider_id],
+          # Probar conexión si se solicita
+          if params[:test_connection_after]
+            test_result = Integrations::TenantConfigurations::TestConnectionService.new(
+              config.integration_provider.id,
               params[:credentials]
             ).call
 
-            if result.success?
-              present result.data, with: Entities::ConnectionTestResultEntity
-            else
+            unless test_result.success?
               error!({
-                error: "connection_error",
-                message: result.errors.join(", ")
+                error: "connection_test_failed",
+                message: "Credenciales actualizadas pero el test de conexión falló: #{test_result.errors.join(', ')}",
+                config: Entities::TenantIntegrationConfigurationEntity.represent(
+                  config, include_computed: true
+                )
               }, 422)
             end
           end
 
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/integration_configurations/stats
-          # Estadísticas de integraciones
-          # ================================================================
-          desc "Obtener estadísticas de integraciones"
-          get "stats" do
-            result = Integrations::TenantConfigurations::GetStatsService.new(
-              current_tenant
-            ).call
+          # Re-activar si estaba activa
+          config.update!(is_active: true) if was_active
 
-            if result.success?
-              present result.data, with: Entities::IntegrationStatsEntity
-            else
-              error!({ error: "stats_error", message: result.errors.join(", ") }, 500)
-            end
-          end
+          present config,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true,
+                  include_provider: true
+        else
+          error!({
+            error: "validation_error",
+            message: config.errors.full_messages.join(", ")
+          }, 422)
         end
       end
-    end
 
-    # ====================================================================
-    # ENDPOINTS AUXILIARES (fuera del scope tenant)
-    # ====================================================================
-
-    resource :integration_configurations do
-      # GET /api/v1/integration_configurations/sync_schedule_options
-      desc "Obtener opciones para configuración de sincronización"
-      get "sync_schedule_options" do
-        present({}, with: Entities::SyncScheduleOptionsEntity)
-      end
-    end
-
-    # ====================================================================
-    # MARKETPLACE - OBTENER FORMULARIO DE CREDENCIALES
-    # ====================================================================
-    resource :marketplace do
-      desc "Obtener formulario de credenciales de un proveedor"
+      # Bloque 2: Actualizar Features
+      desc "Actualizar features habilitadas"
       params do
-        requires :slug, type: String
+        requires :id, type: Integer
+        requires :enabled_features, type: Array[String], desc: "Lista de feature keys a habilitar"
       end
-      get "providers/:slug/credentials_form" do
-        result = Integrations::TenantConfigurations::GetCredentialsFormService.new(
-          params[:slug]
+      put ":id/features" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        # Validar que todas las features existan
+        available_features = config.integration_provider.integration_features.active.pluck(:feature_key)
+        invalid_features = params[:enabled_features] - available_features
+
+        if invalid_features.any?
+          error!({
+            error: "invalid_features",
+            message: "Features no disponibles: #{invalid_features.join(', ')}",
+            available_features: available_features
+          }, 422)
+        end
+
+        if config.update(enabled_features: params[:enabled_features])
+          present config,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true,
+                  include_features: true
+        else
+          error!({
+            error: "validation_error",
+            message: config.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+
+      # Bloque 3: Actualizar Programación
+      desc "Actualizar configuración de programación de sincronización"
+      params do
+        requires :id, type: Integer
+        requires :sync_frequency, type: String, values: %w[daily weekly monthly]
+        requires :sync_hour, type: Integer, values: 0..23
+        optional :sync_day_of_week, type: Integer, values: 0..6
+        optional :sync_day_of_month, type: String, values: %w[start end]
+      end
+      put ":id/schedule" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        update_params = {
+          sync_frequency: params[:sync_frequency],
+          sync_hour: params[:sync_hour],
+          sync_day_of_week: params[:sync_day_of_week],
+          sync_day_of_month: params[:sync_day_of_month]
+        }
+
+        if config.update(update_params)
+          present config,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: config.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+
+      # Actualización completa (mantener por compatibilidad)
+      desc "Actualizar configuración completa"
+      params do
+        requires :id, type: Integer
+        optional :credentials, type: Hash
+        optional :enabled_features, type: Array[String]
+        optional :sync_frequency, type: String, values: %w[daily weekly monthly]
+        optional :sync_hour, type: Integer, values: 0..23
+        optional :sync_day_of_week, type: Integer, values: 0..6
+        optional :sync_day_of_month, type: String, values: %w[start end]
+        optional :sync_config, type: Hash
+      end
+      put ":id" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        result = Integrations::TenantConfigurations::UpdateService.new(
+          config,
+          declared(params, include_missing: false)
         ).call
 
         if result.success?
-          present result.data, with: Entities::CredentialsFormEntity
+          present result.data,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true,
+                  include_provider: true
         else
-          error!({ error: "not_found", message: result.errors.join(", ") }, 404)
+          error!({
+            error: "validation_error",
+            message: result.errors.join(", ")
+          }, 422)
         end
       end
 
-      desc "Obtener features disponibles de un proveedor"
+      desc "Activar configuración"
       params do
-        requires :slug, type: String
+        requires :id, type: Integer
       end
-      get "providers/:slug/features" do
-        provider = IntegrationProvider.for_marketplace.find_by!(slug: params[:slug])
-        features = provider.integration_features.active.ordered
+      post ":id/activate" do
+        config = TenantIntegrationConfiguration.find(params[:id])
 
-        present features, with: Entities::FeatureSelectionEntity
+        result = Integrations::TenantConfigurations::ActivateService.new(config).call
+
+        if result.success?
+          present result.data,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "activation_error",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+      desc "Desactivar configuración"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/deactivate" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        result = Integrations::TenantConfigurations::DeactivateService.new(config).call
+
+        if result.success?
+          present result.data,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "deactivation_error",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+       desc "Re-probar conexión de una configuración existente"
+      params do
+        requires :id, type: Integer
+        optional :use_new_credentials, type: Hash,
+                 desc: "Probar con credenciales diferentes sin guardarlas"
+      end
+      post ":id/test_connection" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        # Usar credenciales de prueba o las actuales
+        credentials_to_test = params[:use_new_credentials] || config.credentials
+
+        result = Integrations::TenantConfigurations::TestConnectionService.new(
+          config.integration_provider.id,
+          credentials_to_test
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::ConnectionTestResultEntity
+        else
+          error!({
+            error: "connection_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+      desc "Ejecutar sincronización manual de una feature específica"
+      params do
+        requires :id, type: Integer
+        requires :feature_key, type: String,
+                 values: %w[fuel battery trips real_time_location odometer diagnostics],
+                 desc: "Feature a sincronizar"
+      end
+      post ":id/sync" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        # Verificar que esté activa
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        # Verificar que la feature esté habilitada
+        unless config.feature_enabled?(params[:feature_key])
+          error!({
+            error: "feature_not_enabled",
+            message: "La feature '#{params[:feature_key]}' no está habilitada en esta configuración",
+            enabled_features: config.enabled_features
+          }, 422)
+        end
+
+        # Ejecutar sincronización
+        result = Integrations::Sync::SyncExecutionService.new(
+          config,
+          params[:feature_key],
+          manual: true
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::SyncResultEntity
+        else
+          error!({
+            error: "sync_error",
+            message: result.errors.join(", "),
+            execution_id: result.data&.dig(:execution_id)
+          }, 422)
+        end
+      end
+
+      # Sincronizar todas las features habilitadas
+      desc "Ejecutar sincronización de TODAS las features habilitadas"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/sync_all" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        if config.enabled_features.empty?
+          error!({
+            error: "no_features_enabled",
+            message: "No hay features habilitadas para sincronizar"
+          }, 422)
+        end
+
+        # Ejecutar sync para cada feature
+        results = []
+        config.enabled_features.each do |feature_key|
+          result = Integrations::Sync::SyncExecutionService.new(
+            config,
+            feature_key,
+            manual: true
+          ).call
+
+          results << {
+            feature_key: feature_key,
+            success: result.success?,
+            execution_id: result.data&.dig(:execution_id),
+            message: result.success? ? result.message : result.errors.join(", ")
+          }
+        end
+
+        {
+          total_features: results.count,
+          successful: results.count { |r| r[:success] },
+          failed: results.count { |r| !r[:success] },
+          results: results
+        }
+      end
+
+      desc "Eliminar configuración de integración"
+      params do
+        requires :id, type: Integer
+      end
+      delete ":id" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        result = Integrations::TenantConfigurations::DestroyService.new(config).call
+
+        if result.success?
+          { success: true, message: result.message }
+        else
+          error!({
+            error: "deletion_error",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+      desc "Obtener estadísticas de sincronización de una configuración"
+      params do
+        requires :id, type: Integer
+      end
+      get ":id/statistics" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        {
+          configuration_id: config.id,
+          provider: {
+            name: config.integration_provider.name,
+            slug: config.integration_provider.slug
+          },
+          sync_statistics: config.sync_statistics,
+          enabled_features: config.enabled_features,
+          is_active: config.is_active,
+          last_sync_at: config.last_sync_at,
+          last_sync_status: config.last_sync_status,
+          sync_schedule: config.sync_schedule_description
+        }
+      end
+
+      desc "Obtener historial de sincronizaciones"
+      params do
+        requires :id, type: Integer
+        optional :feature_key, type: String
+        optional :status, type: String, values: %w[running completed failed]
+        optional :limit, type: Integer, default: 50
+      end
+      get ":id/sync_history" do
+        config = TenantIntegrationConfiguration.find(params[:id])
+
+        executions = config.integration_sync_executions.recent
+        executions = executions.by_feature(params[:feature_key]) if params[:feature_key]
+        executions = executions.where(status: params[:status]) if params[:status]
+        executions = executions.limit(params[:limit])
+
+        present executions, with: Entities::IntegrationSyncExecutionSummaryEntity
+      end
+
+      desc "Obtener opciones disponibles para programación"
+      get "schedule_options" do
+        present({}, with: Entities::SyncScheduleOptionsEntity)
       end
     end
   end
 end
+
+# app/api/v1/tenants.rb
+module V1
+  class TenantsApi < Grape::API
+    helpers do
+      # Helper para autenticación admin (ajustar según tu sistema)
+      def require_admin!
+        # Implementar lógica de autenticación admin
+        # error!({ error: "unauthorized" }, 401) unless current_user&.admin?
+      end
+    end
+
+    resource :tenants do
+      desc "Listar todos los tenants (clientes)"
+      params do
+        optional :status, type: String, values: %w[active suspended trial], desc: "Filtrar por estado"
+        optional :search, type: String, desc: "Buscar por nombre o email"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50, values: 1..100
+        optional :include_integrations, type: Boolean, default: false
+        optional :include_counts, type: Boolean, default: true
+      end
+      get do
+        # require_admin! # Descomentar para requerir permisos admin
+
+        tenants = Tenant.all
+
+        # Filtros
+        tenants = tenants.where(status: params[:status]) if params[:status]
+
+        if params[:search].present?
+          search_term = "%#{params[:search]}%"
+          tenants = tenants.where(
+            "name ILIKE :term OR email ILIKE :term OR slug ILIKE :term",
+            term: search_term
+          )
+        end
+
+        # Ordenar
+        tenants = tenants.order(created_at: :desc)
+
+        # Paginación
+        total = tenants.count
+        tenants = tenants.offset((params[:page] - 1) * params[:per_page])
+                        .limit(params[:per_page])
+
+        # Presentar
+        {
+          tenants: Entities::TenantEntity.represent(
+            tenants,
+            include_integrations: params[:include_integrations],
+            include_counts: params[:include_counts],
+            include_computed: true
+          ),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+      desc "Obtener detalle de un tenant"
+      params do
+        requires :id, type: Integer, desc: "ID del tenant"
+        optional :include_integrations, type: Boolean, default: true
+        optional :include_statistics, type: Boolean, default: true
+      end
+      get ":id" do
+        tenant = Tenant.find(params[:id])
+
+        entity_options = {
+          include_integrations: params[:include_integrations],
+          include_counts: true,
+          include_computed: true
+        }
+
+        result = Entities::TenantEntity.represent(tenant, entity_options).as_json
+
+        # Agregar estadísticas si se solicitan
+        if params[:include_statistics]
+          result[:statistics] = {
+            total_vehicles: tenant.vehicles.count,
+            active_vehicles: tenant.vehicles.active.count,
+            total_refuelings: VehicleRefueling.by_tenant(tenant.id).count,
+            total_charges: VehicleElectricCharge.by_tenant(tenant.id).count,
+            last_sync: tenant.tenant_integration_configurations.active.maximum(:last_sync_at)
+          }
+        end
+
+        result
+      end
+      desc "Crear nuevo tenant (cliente)"
+      params do
+        requires :name, type: String, desc: "Nombre del tenant"
+        requires :email, type: String, desc: "Email de contacto"
+        optional :slug, type: String, desc: "Slug único (se genera automáticamente si no se proporciona)"
+        optional :status, type: String, values: %w[active suspended trial], default: "trial"
+        optional :settings, type: Hash, default: {}, desc: "Configuración personalizada"
+      end
+      post do
+        # require_admin!
+
+        tenant = Tenant.new(declared(params, include_missing: false))
+
+        if tenant.save
+          present tenant,
+                  with: Entities::TenantEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: tenant.errors.full_messages.join(", "),
+            details: tenant.errors.messages
+          }, 422)
+        end
+      end
+      desc "Actualizar tenant"
+      params do
+        requires :id, type: Integer
+        optional :name, type: String
+        optional :email, type: String
+        optional :status, type: String, values: %w[active suspended trial]
+        optional :settings, type: Hash
+      end
+      put ":id" do
+        # require_admin!
+
+        tenant = Tenant.find(params[:id])
+
+        if tenant.update(declared(params, include_missing: false))
+          present tenant,
+                  with: Entities::TenantEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: tenant.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+      desc "Eliminar tenant"
+      params do
+        requires :id, type: Integer
+        optional :force, type: Boolean, default: false, desc: "Forzar eliminación incluso con datos"
+      end
+      delete ":id" do
+        # require_admin!
+
+        tenant = Tenant.find(params[:id])
+
+        # Verificar si tiene datos asociados
+        if !params[:force] && tenant.has_associated_data?
+          error!({
+            error: "tenant_has_data",
+            message: "El tenant tiene datos asociados. Use force=true para eliminar de todas formas.",
+            data: {
+              vehicles_count: tenant.vehicles.count,
+              configurations_count: tenant.tenant_integration_configurations.count,
+              refuelings_count: VehicleRefueling.by_tenant(tenant.id).count,
+              charges_count: VehicleElectricCharge.by_tenant(tenant.id).count
+            }
+          }, 422)
+        end
+
+        if tenant.destroy
+          { success: true, message: "Tenant eliminado exitosamente" }
+        else
+          error!({
+            error: "deletion_error",
+            message: tenant.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+      desc "Activar tenant"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/activate" do
+        # require_admin!
+
+        tenant = Tenant.find(params[:id])
+        tenant.update!(status: "active")
+
+        present tenant,
+                with: Entities::TenantEntity,
+                include_computed: true
+      end
+      desc "Suspender tenant"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/suspend" do
+        # require_admin!
+
+        tenant = Tenant.find(params[:id])
+        tenant.update!(status: "suspended")
+
+        # Desactivar todas sus integraciones
+        tenant.tenant_integration_configurations.active.update_all(is_active: false)
+
+        present tenant,
+                with: Entities::TenantEntity,
+                include_computed: true
+      end
+      desc "Obtener estadísticas detalladas del tenant"
+      params do
+        requires :id, type: Integer
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+      end
+      get ":id/statistics" do
+        tenant = Tenant.find(params[:id])
+
+        from_date = params[:from_date] || 30.days.ago
+        to_date = params[:to_date] || Date.current
+
+        {
+          tenant_id: tenant.id,
+          tenant_name: tenant.name,
+          period: {
+            from: from_date,
+            to: to_date
+          },
+          vehicles: {
+            total: tenant.vehicles.count,
+            active: tenant.vehicles.active.count,
+            with_telemetry: tenant.vehicles_with_telemetry.count
+          },
+          integrations: {
+            total: tenant.tenant_integration_configurations.count,
+            active: tenant.tenant_integration_configurations.active.count,
+            by_provider: tenant.tenant_integration_configurations
+              .joins(:integration_provider)
+              .group("integration_providers.name")
+              .count
+          },
+          refuelings: {
+            total: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date).count,
+            total_liters: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:volume_liters).to_f.round(2),
+            total_cost: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:cost).to_f.round(2)
+          },
+          electric_charges: {
+            total: VehicleElectricCharge.by_tenant(tenant.id)
+              .between_dates(from_date, to_date).count,
+            total_kwh: VehicleElectricCharge.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:energy_consumed_kwh).to_f.round(2)
+          },
+          syncs: {
+            total_executions: IntegrationSyncExecution
+              .joins(:tenant_integration_configuration)
+              .where(tenant_integration_configurations: { tenant_id: tenant.id })
+              .where("started_at BETWEEN ? AND ?", from_date, to_date)
+              .count,
+            successful: IntegrationSyncExecution
+              .joins(:tenant_integration_configuration)
+              .where(tenant_integration_configurations: { tenant_id: tenant.id })
+              .where("started_at BETWEEN ? AND ?", from_date, to_date)
+              .completed.count
+          }
+        }
+      end
+      desc "Estadísticas globales de todos los tenants"
+      get "stats" do
+        # require_admin!
+
+        {
+          total_tenants: Tenant.count,
+          by_status: Tenant.group(:status).count,
+          active_tenants: Tenant.active.count,
+          total_vehicles: Vehicle.count,
+          total_integrations: TenantIntegrationConfiguration.count,
+          active_integrations: TenantIntegrationConfiguration.active.count,
+          total_refuelings: VehicleRefueling.count,
+          total_charges: VehicleElectricCharge.count,
+          most_active_tenants: Tenant
+            .joins(:tenant_integration_configurations)
+            .group("tenants.id", "tenants.name")
+            .select("tenants.id, tenants.name, COUNT(tenant_integration_configurations.id) as integrations_count")
+            .order("integrations_count DESC")
+            .limit(10)
+            .map { |t| { id: t.id, name: t.name, integrations_count: t.integrations_count } }
+        }
+      end
+    end
+  end
+end
+
+
 # app/api/v1/vehicle_electric_charges.rb
 module V1
   class VehicleElectricChargesApi < Grape::API
@@ -516,10 +1086,6 @@ module V1
         resource :vehicles do
           route_param :vehicle_id do
             resource :electric_charges do
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges
-              # Listar cargas de un vehículo
-              # ======================================================
               desc "Listar cargas eléctricas de un vehículo"
               params do
                 optional :from_date, type: Date
@@ -543,11 +1109,6 @@ module V1
                         with: Entities::VehicleElectricChargeEntity,
                         include_computed: true
               end
-
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/electric_charges/:id
-              # Detalle de una carga
-              # ======================================================
               desc "Detalle de una carga eléctrica"
               params do
                 requires :id, type: Integer
@@ -564,11 +1125,6 @@ module V1
             end
           end
         end
-
-        # ============================================================
-        # GET /api/v1/tenants/:tenant_id/electric_charges
-        # Listar todas las cargas del tenant
-        # ============================================================
         resource :electric_charges do
           desc "Listar todas las cargas eléctricas del tenant"
           params do
@@ -596,6 +1152,7 @@ module V1
     end
   end
 end
+
 # app/api/v1/vehicle_provider_mappings.rb
 module V1
   class VehicleProviderMappingsApi < Grape::API
@@ -610,10 +1167,6 @@ module V1
         resource :integration_configurations do
           route_param :config_id do
             resource :vehicle_mappings do
-              # ============================================================
-              # GET /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
-              # Listar mapeos de vehículos
-              # ============================================================
               desc "Listar mapeos de vehículos para una configuración"
               params do
                 optional :active_only, type: Boolean, default: false
@@ -625,11 +1178,6 @@ module V1
 
                 present mappings, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings
-              # Crear mapeo
-              # ============================================================
               desc "Crear mapeo entre vehículo y proveedor"
               params do
                 requires :vehicle_id, type: Integer
@@ -655,11 +1203,6 @@ module V1
                   error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
                 end
               end
-
-              # ============================================================
-              # PUT /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
-              # Actualizar mapeo
-              # ============================================================
               desc "Actualizar mapeo"
               params do
                 requires :id, type: Integer
@@ -676,11 +1219,6 @@ module V1
                   error!({ error: "validation_error", message: mapping.errors.full_messages.join(", ") }, 422)
                 end
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/activate
-              # Activar mapeo
-              # ============================================================
               desc "Activar mapeo"
               params do
                 requires :id, type: Integer
@@ -692,11 +1230,6 @@ module V1
                 mapping.activate!
                 present mapping, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # POST /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id/deactivate
-              # Desactivar mapeo
-              # ============================================================
               desc "Desactivar mapeo"
               params do
                 requires :id, type: Integer
@@ -708,11 +1241,6 @@ module V1
                 mapping.deactivate!
                 present mapping, with: Entities::VehicleProviderMappingEntity
               end
-
-              # ============================================================
-              # DELETE /api/v1/tenants/:tenant_id/integration_configurations/:config_id/vehicle_mappings/:id
-              # Eliminar mapeo
-              # ============================================================
               desc "Eliminar mapeo"
               params do
                 requires :id, type: Integer
@@ -734,6 +1262,7 @@ module V1
     end
   end
 end
+
 # app/api/v1/vehicle_refuelings.rb
 module V1
   class VehicleRefuelingsApi < Grape::API
@@ -748,10 +1277,6 @@ module V1
         resource :vehicles do
           route_param :vehicle_id do
             resource :refuelings do
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings
-              # Listar repostajes de un vehículo
-              # ======================================================
               desc "Listar repostajes de un vehículo"
               params do
                 optional :from_date, type: Date
@@ -773,11 +1298,6 @@ module V1
                         with: Entities::VehicleRefuelingEntity,
                         include_computed: true
               end
-
-              # ======================================================
-              # GET /api/v1/tenants/:tenant_id/vehicles/:vehicle_id/refuelings/:id
-              # Detalle de un repostaje
-              # ======================================================
               desc "Detalle de un repostaje"
               params do
                 requires :id, type: Integer
@@ -794,11 +1314,6 @@ module V1
             end
           end
         end
-
-        # ============================================================
-        # GET /api/v1/tenants/:tenant_id/refuelings
-        # Listar todos los repostajes del tenant
-        # ============================================================
         resource :refuelings do
           desc "Listar todos los repostajes del tenant"
           params do
@@ -826,6 +1341,7 @@ module V1
     end
   end
 end
+
 # app/api/v1/vehicles.rb
 module V1
   class VehiclesApi < Grape::API
@@ -838,10 +1354,6 @@ module V1
     resource :tenants do
       route_param :tenant_id do
         resource :vehicles do
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/vehicles
-          # Listar vehículos del tenant
-          # ================================================================
           desc "Listar vehículos del tenant"
           params do
             optional :status, type: String, values: Vehicle.statuses
@@ -866,11 +1378,6 @@ module V1
 
             present vehicles, with: Entities::VehicleEntity
           end
-
-          # ================================================================
-          # GET /api/v1/tenants/:tenant_id/vehicles/:id
-          # Obtener detalle de un vehículo
-          # ================================================================
           desc "Obtener detalle de un vehículo"
           params do
             requires :id, type: Integer
@@ -882,11 +1389,6 @@ module V1
                     include_telemetry: true,
                     include_statistics: true
           end
-
-          # ================================================================
-          # POST /api/v1/tenants/:tenant_id/vehicles
-          # Crear vehículo
-          # ================================================================
           desc "Crear vehículo"
           params do
             requires :name, type: String
@@ -912,11 +1414,6 @@ module V1
               error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # PUT /api/v1/tenants/:tenant_id/vehicles/:id
-          # Actualizar vehículo
-          # ================================================================
           desc "Actualizar vehículo"
           params do
             requires :id, type: Integer
@@ -945,11 +1442,6 @@ module V1
               error!({ error: "validation_error", message: vehicle.errors.full_messages.join(", ") }, 422)
             end
           end
-
-          # ================================================================
-          # DELETE /api/v1/tenants/:tenant_id/vehicles/:id
-          # Eliminar vehículo
-          # ================================================================
           desc "Eliminar vehículo"
           params do
             requires :id, type: Integer
