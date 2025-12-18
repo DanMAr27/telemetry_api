@@ -1,70 +1,167 @@
 # app/models/vehicle.rb
 class Vehicle < ApplicationRecord
-  # Associations
-  belongs_to :company
-  has_one :vehicle_telemetry_config, dependent: :destroy
-  has_many :refuels, dependent: :destroy
-  has_many :electric_charges, dependent: :destroy
-  has_many :telemetry_sync_logs, dependent: :nullify
+  belongs_to :tenant
 
-  # Validations
-  validates :name, presence: true
-  validates :license_plate, presence: true, uniqueness: { scope: :company_id }
-  validates :fuel_type, inclusion: { in: %w[combustion electric hybrid], allow_nil: true }
+
+  has_many :vehicle_provider_mappings, dependent: :destroy
+  has_many :tenant_integration_configurations, through: :vehicle_provider_mappings
+
+  has_many :vehicle_refuelings, dependent: :destroy
+  has_many :vehicle_electric_charges, dependent: :destroy
+
+  validates :name, presence: true, length: { maximum: 255 }
+  validates :license_plate, presence: true,
+                            length: { maximum: 20 },
+                            uniqueness: { scope: :tenant_id, case_sensitive: false }
+
+  validates :vin, length: { is: 17 }, allow_blank: true,
+                  uniqueness: true,
+                  format: { with: /\A[A-HJ-NPR-Z0-9]{17}\z/, message: "formato VIN inválido" }
+
+  validates :status, presence: true,
+                     inclusion: { in: %w[active maintenance inactive sold] }
+
+  validates :fuel_type, inclusion: {
+    in: %w[diesel gasoline electric hybrid lpg cng hydrogen],
+    message: "%{value} no es un tipo de combustible válido"
+  }, allow_blank: true
+
+  validates :vehicle_type, inclusion: {
+    in: %w[car van truck motorcycle bus],
+    message: "%{value} no es un tipo de vehículo válido"
+  }, allow_blank: true
+
+  validates :year, numericality: {
+    only_integer: true,
+    greater_than_or_equal_to: 1900,
+    less_than_or_equal_to: -> { Date.current.year + 1 }
+  }, allow_nil: true
+
   validates :tank_capacity_liters, numericality: { greater_than: 0 }, allow_nil: true
   validates :battery_capacity_kwh, numericality: { greater_than: 0 }, allow_nil: true
+  validates :initial_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :current_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
 
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :inactive, -> { where(is_active: false) }
-  scope :with_telemetry, -> { joins(:vehicle_telemetry_config).where(vehicle_telemetry_configs: { is_active: true }) }
-  scope :without_telemetry, -> { where.missing(:vehicle_telemetry_config) }
-  scope :combustion, -> { where(fuel_type: "combustion") }
-  scope :electric, -> { where(fuel_type: "electric") }
-  scope :hybrid, -> { where(fuel_type: "hybrid") }
+  scope :active, -> { where(status: "active") }
+  scope :inactive, -> { where(status: "inactive") }
+  scope :in_maintenance, -> { where(status: "maintenance") }
+  scope :electric, -> { where(is_electric: true) }
+  scope :combustion, -> { where(is_electric: false) }
+  scope :by_fuel_type, ->(type) { where(fuel_type: type) }
+  scope :by_vehicle_type, ->(type) { where(vehicle_type: type) }
+  scope :by_brand, ->(brand) { where(brand: brand) }
+  scope :recent, -> { order(created_at: :desc) }
+  scope :by_name, -> { order(:name) }
 
-  # Instance methods
-  def has_telemetry?
-    vehicle_telemetry_config.present? && vehicle_telemetry_config.is_active?
+  before_validation :normalize_license_plate
+  before_validation :set_is_electric_flag
+  before_save :normalize_vin
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Estado
+  def active?
+    status == "active"
   end
 
-  def requires_manual_entry?
-    !has_telemetry?
+  def in_maintenance?
+    status == "maintenance"
   end
 
-  def telemetry_provider_name
-    vehicle_telemetry_config&.provider_name
+  def inactive?
+    status == "inactive"
   end
 
-  def is_electric?
-    fuel_type == "electric"
+  def sold?
+    status == "sold"
   end
 
-  def is_combustion?
-    fuel_type == "combustion"
+  # Tipo de energía
+  def electric?
+    is_electric
   end
 
-  def is_hybrid?
+  def combustion?
+    !is_electric
+  end
+
+  def hybrid?
     fuel_type == "hybrid"
   end
 
-  def last_refuel
-    refuels.recent.first
+  # Telemetría
+  def has_telemetry?
+    vehicle_provider_mappings.active.any?
   end
 
-  def last_charge
-    electric_charges.recent.first
+  def active_telemetry_provider
+    vehicle_provider_mappings.active.first&.integration_provider
   end
 
-  def total_refuels_count
-    refuels.count
+  # Mantenimiento
+  def needs_maintenance?
+    return false unless next_maintenance_date
+    next_maintenance_date <= Date.current
   end
 
-  def total_charges_count
-    electric_charges.count
+  def days_until_maintenance
+    return nil unless next_maintenance_date
+    (next_maintenance_date - Date.current).to_i
+  end
+
+  # Kilometraje
+  def total_km_driven
+    return 0 unless initial_odometer_km && current_odometer_km
+    current_odometer_km - initial_odometer_km
+  end
+
+  def update_odometer!(new_odometer)
+    update!(current_odometer_km: new_odometer) if new_odometer > (current_odometer_km || 0)
+  end
+
+  # Descripción
+  def full_name
+    parts = [ brand, model, license_plate ].compact
+    parts.join(" - ")
   end
 
   def display_name
     "#{name} (#{license_plate})"
+  end
+
+  # ============================================================================
+  # CLASS METHODS
+  # ============================================================================
+
+  def self.fuel_types
+    %w[diesel gasoline electric hybrid lpg cng hydrogen]
+  end
+
+  def self.vehicle_types
+    %w[car van truck motorcycle bus]
+  end
+
+  def self.statuses
+    %w[active maintenance inactive sold]
+  end
+
+  private
+
+  # ============================================================================
+  # CALLBACKS PRIVADOS
+  # ============================================================================
+
+  def normalize_license_plate
+    self.license_plate = license_plate&.upcase&.strip
+  end
+
+  def set_is_electric_flag
+    self.is_electric = (fuel_type == "electric")
+  end
+
+  def normalize_vin
+    self.vin = vin&.upcase&.strip if vin.present?
   end
 end

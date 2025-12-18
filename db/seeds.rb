@@ -1,723 +1,885 @@
-# db/seeds.rb
-# Seeds para el sistema de telemetría
-# Este archivo elimina y recarga todos los datos de prueba
+# ==============================================================================
+# db/seeds.rb - SEED AJUSTADO A MODELOS EXISTENTES
+# ==============================================================================
 
-puts "🧹 Limpiando datos existentes..."
+puts "\n" + "="*80
+puts "🌱 INICIANDO SEEDS"
+puts "="*80 + "\n"
 
-# Orden de eliminación (de dependientes a independientes)
-begin
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE telemetry_normalization_errors CASCADE") if ActiveRecord::Base.connection.table_exists?('telemetry_normalization_errors')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE telemetry_sync_logs CASCADE") if ActiveRecord::Base.connection.table_exists?('telemetry_sync_logs')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE electric_charges CASCADE") if ActiveRecord::Base.connection.table_exists?('electric_charges')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE refuels CASCADE") if ActiveRecord::Base.connection.table_exists?('refuels')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE vehicle_telemetry_configs CASCADE") if ActiveRecord::Base.connection.table_exists?('vehicle_telemetry_configs')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE vehicles CASCADE") if ActiveRecord::Base.connection.table_exists?('vehicles')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE telemetry_credentials CASCADE") if ActiveRecord::Base.connection.table_exists?('telemetry_credentials')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE telemetry_providers CASCADE") if ActiveRecord::Base.connection.table_exists?('telemetry_providers')
-  ActiveRecord::Base.connection.execute("TRUNCATE TABLE companies CASCADE") if ActiveRecord::Base.connection.table_exists?('companies')
+# ==============================================================================
+# LIMPIAR DATOS (solo desarrollo)
+# ==============================================================================
 
-  # Reset sequences
-  ActiveRecord::Base.connection.reset_pk_sequence!('telemetry_normalization_errors') if ActiveRecord::Base.connection.table_exists?('telemetry_normalization_errors')
-  ActiveRecord::Base.connection.reset_pk_sequence!('telemetry_sync_logs') if ActiveRecord::Base.connection.table_exists?('telemetry_sync_logs')
-  ActiveRecord::Base.connection.reset_pk_sequence!('electric_charges') if ActiveRecord::Base.connection.table_exists?('electric_charges')
-  ActiveRecord::Base.connection.reset_pk_sequence!('refuels') if ActiveRecord::Base.connection.table_exists?('refuels')
-  ActiveRecord::Base.connection.reset_pk_sequence!('vehicle_telemetry_configs') if ActiveRecord::Base.connection.table_exists?('vehicle_telemetry_configs')
-  ActiveRecord::Base.connection.reset_pk_sequence!('vehicles') if ActiveRecord::Base.connection.table_exists?('vehicles')
-  ActiveRecord::Base.connection.reset_pk_sequence!('telemetry_credentials') if ActiveRecord::Base.connection.table_exists?('telemetry_credentials')
-  ActiveRecord::Base.connection.reset_pk_sequence!('telemetry_providers') if ActiveRecord::Base.connection.table_exists?('telemetry_providers')
-  ActiveRecord::Base.connection.reset_pk_sequence!('companies') if ActiveRecord::Base.connection.table_exists?('companies')
+if Rails.env.development?
+  puts "🗑️  Limpiando datos existentes..."
 
-  puts "✅ Datos eliminados correctamente"
-rescue => e
-  puts "⚠️  Error durante la limpieza: #{e.message}"
-  puts "Continuando con la creación de datos..."
+  VehicleElectricCharge.destroy_all
+  VehicleRefueling.destroy_all
+  IntegrationRawData.destroy_all
+  IntegrationSyncExecution.destroy_all
+  VehicleProviderMapping.destroy_all
+  Vehicle.destroy_all
+  TenantIntegrationConfiguration.destroy_all
+  Tenant.destroy_all
+  IntegrationFeature.destroy_all
+  IntegrationAuthSchema.destroy_all
+  IntegrationProvider.destroy_all
+  IntegrationCategory.destroy_all
+
+  puts "✅ Datos limpiados\n"
 end
 
-puts ""
+# ==============================================================================
+# FASE 1: MARKETPLACE
+# ==============================================================================
 
-# ============================================================================
-# PROVEEDORES DE TELEMETRÍA
-# ============================================================================
-puts "📦 Creando proveedores de telemetría..."
+puts "\n📦 FASE 1: Marketplace"
+puts "-" * 80
 
-geotab = TelemetryProvider.create!(
-  name: "Geotab",
-  slug: "geotab",
-  api_base_url: "https://my.geotab.com/apiv1",
-  is_active: true,
-  description: "Geotab is a global leader in IoT and connected transportation solutions",
-  configuration_schema: {
-    required_fields: [ "userName", "password", "database" ],
-    optional_fields: [],
-    auth_type: "credentials"
-  }
-)
-
-webfleet = TelemetryProvider.create!(
-  name: "Webfleet (TomTom)",
-  slug: "webfleet",
-  api_base_url: "https://csv.telematics.tomtom.com/extern",
-  is_active: true,
-  description: "Webfleet Solutions by Bridgestone - Fleet management platform",
-  configuration_schema: {
-    required_fields: [ "account", "username", "password", "apikey" ],
-    optional_fields: [],
-    auth_type: "api_key"
-  }
-)
-
-teltonika = TelemetryProvider.create!(
-  name: "Teltonika",
-  slug: "teltonika",
-  api_base_url: "https://mapon.com/api/v1",
-  is_active: false,
-  description: "Teltonika Telematics - GPS tracking and fleet management",
-  configuration_schema: {
-    required_fields: [ "api_key" ],
-    optional_fields: [],
-    auth_type: "api_key"
-  }
-)
-
-puts "  ✓ Creados 3 proveedores"
-
-# ============================================================================
-# EMPRESAS
-# ============================================================================
-puts "🏢 Creando empresas..."
-
-company1 = Company.create!(
-  name: "Transportes El Rápido S.L.",
-  tax_id: "B12345678",
-  email: "info@elrapido.com",
-  phone: "+34 900 123 456",
-  address: "Calle Principal, 123",
-  city: "Barcelona",
-  state: "Cataluña",
-  postal_code: "08001",
-  country: "España",
+# Categoría
+puts "\n📁 Categoría..."
+telemetry = IntegrationCategory.create!(
+  name: 'Telemetría',
+  slug: 'telemetry',
+  description: 'Proveedores de telemetría vehicular',
+  icon: 'truck',
+  display_order: 1,
   is_active: true
 )
+puts "  ✓ #{telemetry.name}"
 
-company2 = Company.create!(
-  name: "Logística Verde S.A.",
-  tax_id: "A87654321",
-  email: "contacto@logisticaverde.com",
-  phone: "+34 900 654 321",
-  address: "Avenida Sostenible, 45",
-  city: "Madrid",
-  state: "Madrid",
-  postal_code: "28001",
-  country: "España",
+# Proveedores
+puts "\n🏢 Proveedores..."
+geotab = IntegrationProvider.create!(
+  integration_category: telemetry,
+  name: 'Geotab',
+  slug: 'geotab',
+  api_base_url: 'https://my.geotab.com/apiv1',
+  description: 'Líder mundial en telemetría con soporte para flotas mixtas',
+  logo_url: 'https://cdn.example.com/logos/geotab.png',
+  website_url: 'https://www.geotab.com',
+  status: 'active',
+  is_premium: false,
+  display_order: 1,
   is_active: true
 )
+puts "  ✓ Geotab"
 
-company3 = Company.create!(
-  name: "Distribuciones del Norte",
-  tax_id: "B99887766",
-  email: "admin@delnorte.com",
-  phone: "+34 900 789 012",
-  address: "Plaza Mayor, 7",
-  city: "Bilbao",
-  state: "País Vasco",
-  postal_code: "48001",
-  country: "España",
-  is_active: false
+verizon = IntegrationProvider.create!(
+  integration_category: telemetry,
+  name: 'Verizon Connect',
+  slug: 'verizon_connect',
+  api_base_url: 'https://api.verizonconnect.com/v1',
+  description: 'Solución integral de gestión de flotas',
+  logo_url: 'https://cdn.example.com/logos/verizon.png',
+  website_url: 'https://www.verizonconnect.com',
+  status: 'active',
+  is_premium: true,
+  display_order: 2,
+  is_active: true
 )
+puts "  ✓ Verizon Connect"
 
-puts "  ✓ Creadas 3 empresas"
+# Auth Schemas
+puts "\n🔐 Auth Schemas..."
+IntegrationAuthSchema.create!(
+  integration_provider: geotab,
+  auth_fields: [
+    { name: 'database', type: 'text', label: 'Base de Datos', required: true },
+    { name: 'username', type: 'text', label: 'Usuario', required: true },
+    { name: 'password', type: 'password', label: 'Contraseña', required: true }
+  ],
+  example_credentials: {
+    database: 'mi_empresa',
+    username: 'usuario@empresa.com',
+    password: '••••••••'
+  },
+  is_active: true
+)
+puts "  ✓ Schema Geotab"
 
-# ============================================================================
-# CREDENCIALES DE TELEMETRÍA
-# ============================================================================
-puts "🔐 Creando credenciales de telemetría..."
+IntegrationAuthSchema.create!(
+  integration_provider: verizon,
+  auth_fields: [
+    { name: 'api_key', type: 'password', label: 'API Key', required: true },
+    { name: 'account_id', type: 'text', label: 'Account ID', required: true }
+  ],
+  example_credentials: {
+    api_key: 'vz_live_xxxxxxxxxxxx',
+    account_id: 'ACC-12345'
+  },
+  is_active: true
+)
+puts "  ✓ Schema Verizon"
 
-credential1 = TelemetryCredential.create!(
-  company_id: company1.id,
-  telemetry_provider_id: geotab.id,
+# Features
+puts "\n⚡ Features..."
+[
+  { key: 'fuel', name: 'Repostajes', desc: 'Detección automática de repostajes', order: 1 },
+  { key: 'battery', name: 'Cargas Eléctricas', desc: 'Eventos de carga de vehículos eléctricos', order: 2 },
+  { key: 'odometer', name: 'Odómetro', desc: 'Lecturas de kilometraje', order: 3 },
+  { key: 'trips', name: 'Viajes', desc: 'Historial de viajes', order: 4 },
+  { key: 'real_time_location', name: 'GPS', desc: 'Ubicación en tiempo real', order: 5 },
+  { key: 'diagnostics', name: 'Diagnósticos', desc: 'Alertas del vehículo', order: 6 }
+].each do |f|
+  IntegrationFeature.create!(
+    integration_provider: geotab,
+    feature_key: f[:key],
+    feature_name: f[:name],
+    feature_description: f[:desc],
+    display_order: f[:order],
+    is_active: true
+  )
+end
+puts "  ✓ 6 features Geotab"
+
+[
+  { key: 'fuel', name: 'Combustible', desc: 'Gestión de repostajes', order: 1 },
+  { key: 'trips', name: 'Viajes', desc: 'Registro de rutas', order: 2 },
+  { key: 'odometer', name: 'Kilometraje', desc: 'Contador de km', order: 3 },
+  { key: 'real_time_location', name: 'GPS', desc: 'Tracking en vivo', order: 4 }
+].each do |f|
+  IntegrationFeature.create!(
+    integration_provider: verizon,
+    feature_key: f[:key],
+    feature_name: f[:name],
+    feature_description: f[:desc],
+    display_order: f[:order],
+    is_active: true
+  )
+end
+puts "  ✓ 4 features Verizon"
+
+# ==============================================================================
+# FASE 2: TENANTS
+# ==============================================================================
+
+puts "\n📦 FASE 2: Tenants"
+puts "-" * 80
+
+acme = Tenant.create!(
+  name: 'Acme Corporation',
+  slug: 'acme-corp',
+  email: 'admin@acme.com',
+  status: 'active',
+  settings: { timezone: 'Europe/Madrid', language: 'es' }
+)
+puts "  ✓ #{acme.name}"
+
+tech = Tenant.create!(
+  name: 'Tech Solutions',
+  slug: 'tech-solutions',
+  email: 'fleet@techsolutions.com',
+  status: 'active',
+  settings: { timezone: 'Europe/Madrid', language: 'es' }
+)
+puts "  ✓ #{tech.name}"
+
+demo = Tenant.create!(
+  name: 'Demo Company',
+  slug: 'demo-company',
+  email: 'demo@example.com',
+  status: 'active',
+  settings: { is_demo: true }
+)
+puts "  ✓ #{demo.name}"
+
+# ==============================================================================
+# FASE 3: CONFIGURACIONES
+# ==============================================================================
+
+puts "\n📦 FASE 3: Configuraciones"
+puts "-" * 80
+
+acme_geotab = TenantIntegrationConfiguration.create!(
+  tenant: acme,
+  integration_provider: geotab,
   credentials: {
-    userName: "user@elrapido.com",
-    password: "SecurePass123!",
-    database: "elrapido_db"
-  }.to_json,
+    database: 'acme_fleet',
+    username: 'acme_api',
+    password: 'secret123'
+  },
+  enabled_features: [ 'fuel', 'battery', 'odometer', 'trips' ],
+  sync_frequency: 'daily',
+  sync_hour: 2,
   is_active: true,
-  last_sync_at: 2.hours.ago,
-  last_successful_sync_at: 2.hours.ago
+  activated_at: 15.days.ago,
+  last_sync_at: 6.hours.ago,
+  last_sync_status: 'success',
+  sync_config: {}
 )
+puts "  ✓ #{acme.name} → Geotab"
 
-credential2 = TelemetryCredential.create!(
-  company_id: company1.id,
-  telemetry_provider_id: webfleet.id,
+tech_geotab = TenantIntegrationConfiguration.create!(
+  tenant: tech,
+  integration_provider: geotab,
   credentials: {
-    account: "elrapido",
-    username: "api_user",
-    password: "ApiPass456!",
-    apikey: "1234567890abcdef"
-  }.to_json,
+    database: 'tech_db',
+    username: 'tech_user',
+    password: 'tech_pass'
+  },
+  enabled_features: [ 'fuel', 'odometer' ],
+  sync_frequency: 'daily',
+  sync_hour: 3,
   is_active: true,
-  last_sync_at: 1.day.ago,
-  last_successful_sync_at: 1.day.ago
+  activated_at: 7.days.ago,
+  last_sync_at: 8.hours.ago,
+  last_sync_status: 'success',
+  sync_config: {}
 )
+puts "  ✓ #{tech.name} → Geotab"
 
-credential3 = TelemetryCredential.create!(
-  company_id: company2.id,
-  telemetry_provider_id: geotab.id,
+demo_geotab = TenantIntegrationConfiguration.create!(
+  tenant: demo,
+  integration_provider: geotab,
   credentials: {
-    userName: "admin@logisticaverde.com",
-    password: "GreenPass789!",
-    database: "logisticaverde_db"
-  }.to_json,
+    database: 'demo_db',
+    username: 'demo_user',
+    password: 'demo_pass'
+  },
+  enabled_features: [ 'fuel', 'battery', 'odometer' ],
+  sync_frequency: 'daily',
+  sync_hour: 1,
   is_active: true,
-  last_sync_at: 30.minutes.ago,
-  last_successful_sync_at: 30.minutes.ago
+  activated_at: 30.days.ago,
+  last_sync_at: 4.hours.ago,
+  last_sync_status: 'success',
+  sync_config: {}
 )
+puts "  ✓ #{demo.name} → Geotab"
 
-puts "  ✓ Creadas 3 credenciales"
+# ==============================================================================
+# FASE 4: VEHÍCULOS
+# ==============================================================================
 
-# ============================================================================
-# VEHÍCULOS
-# ============================================================================
-puts "🚗 Creando vehículos..."
+puts "\n📦 FASE 4: Vehículos"
+puts "-" * 80
 
-# Vehículos de Transportes El Rápido (combustión y eléctricos)
-vehicle1 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Furgoneta 1",
-  license_plate: "1234ABC",
-  vin: "VF1RW000123456789",
-  brand: "Renault",
-  model: "Master",
+# Acme - 4 vehículos
+acme_v1 = Vehicle.create!(
+  tenant: acme,
+  name: 'Ford Transit',
+  license_plate: '1234ABC',
+  vin: 'WF0NXXGBVNDA12345',
+  brand: 'Ford',
+  model: 'Transit',
   year: 2022,
-  fuel_type: "combustion",
-  tank_capacity_liters: 80.0,
-  is_active: true
+  vehicle_type: 'van',
+  fuel_type: 'diesel',
+  is_electric: false,
+  tank_capacity_liters: 80,
+  initial_odometer_km: 15000,
+  current_odometer_km: 42350,
+  status: 'active'
 )
+puts "  ✓ #{acme_v1.license_plate} (Diesel)"
 
-vehicle2 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Furgoneta 2",
-  license_plate: "5678DEF",
-  vin: "VF1RW000987654321",
-  brand: "Renault",
-  model: "Master",
-  year: 2022,
-  fuel_type: "combustion",
-  tank_capacity_liters: 80.0,
-  is_active: true
-)
-
-vehicle3 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Camión 1",
-  license_plate: "9012GHI",
-  vin: "WDB9340071L123456",
-  brand: "Mercedes-Benz",
-  model: "Actros",
+acme_v2 = Vehicle.create!(
+  tenant: acme,
+  name: 'Mercedes Actros',
+  license_plate: '5678DEF',
+  brand: 'Mercedes',
+  model: 'Actros',
   year: 2021,
-  fuel_type: "combustion",
-  tank_capacity_liters: 380.0,
-  is_active: true
+  vehicle_type: 'truck',
+  fuel_type: 'diesel',
+  is_electric: false,
+  tank_capacity_liters: 400,
+  initial_odometer_km: 35000,
+  current_odometer_km: 128450,
+  status: 'active'
 )
+puts "  ✓ #{acme_v2.license_plate} (Diesel)"
 
-vehicle4 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Eléctrico 1",
-  license_plate: "3456JKL",
-  vin: "5YJ3E1EA1KF123456",
-  brand: "Tesla",
-  model: "Model 3",
+acme_v3 = Vehicle.create!(
+  tenant: acme,
+  name: 'Tesla Model 3',
+  license_plate: '9012GHI',
+  brand: 'Tesla',
+  model: 'Model 3',
   year: 2023,
-  fuel_type: "electric",
-  battery_capacity_kwh: 75.0,
-  is_active: true
+  vehicle_type: 'car',
+  fuel_type: 'electric',
+  is_electric: true,
+  battery_capacity_kwh: 60,
+  initial_odometer_km: 5000,
+  current_odometer_km: 18750,
+  status: 'active'
 )
+puts "  ✓ #{acme_v3.license_plate} (Eléctrico)"
 
-vehicle5 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Eléctrico 2",
-  license_plate: "7890MNO",
-  vin: "WVWZZZAUZLW123456",
-  brand: "Volkswagen",
-  model: "ID.4",
+acme_v4 = Vehicle.create!(
+  tenant: acme,
+  name: 'Toyota Prius',
+  license_plate: '3456JKL',
+  brand: 'Toyota',
+  model: 'Prius',
   year: 2023,
-  fuel_type: "electric",
-  battery_capacity_kwh: 77.0,
-  is_active: true
-)
-
-vehicle6 = Vehicle.create!(
-  company_id: company1.id,
-  name: "Híbrido 1",
-  license_plate: "2345PQR",
-  vin: "JTDKARFP1K3123456",
-  brand: "Toyota",
-  model: "Prius",
-  year: 2023,
-  fuel_type: "hybrid",
-  tank_capacity_liters: 43.0,
+  vehicle_type: 'car',
+  fuel_type: 'hybrid',
+  is_electric: false,
+  tank_capacity_liters: 43,
   battery_capacity_kwh: 8.8,
-  is_active: true
+  initial_odometer_km: 8000,
+  current_odometer_km: 25600,
+  status: 'active'
 )
+puts "  ✓ #{acme_v4.license_plate} (Híbrido)"
 
-# Vehículos de Logística Verde (solo eléctricos)
-vehicle7 = Vehicle.create!(
-  company_id: company2.id,
-  name: "EV Delivery 1",
-  license_plate: "4567STU",
-  vin: "5YJ3E1EB3LF234567",
-  brand: "Tesla",
-  model: "Model Y",
-  year: 2024,
-  fuel_type: "electric",
-  battery_capacity_kwh: 75.0,
-  is_active: true
+# Tech - 2 vehículos
+tech_v1 = Vehicle.create!(
+  tenant: tech,
+  name: 'Renault Master',
+  license_plate: '7890MNO',
+  brand: 'Renault',
+  model: 'Master',
+  year: 2020,
+  vehicle_type: 'van',
+  fuel_type: 'diesel',
+  is_electric: false,
+  tank_capacity_liters: 70,
+  initial_odometer_km: 22000,
+  current_odometer_km: 67890,
+  status: 'active'
 )
+puts "  ✓ #{tech_v1.license_plate} (Diesel)"
 
-vehicle8 = Vehicle.create!(
-  company_id: company2.id,
-  name: "EV Delivery 2",
-  license_plate: "8901VWX",
-  vin: "5YJ3E1EB5LF345678",
-  brand: "Tesla",
-  model: "Model Y",
-  year: 2024,
-  fuel_type: "electric",
-  battery_capacity_kwh: 75.0,
-  is_active: true
+tech_v2 = Vehicle.create!(
+  tenant: tech,
+  name: 'Peugeot Boxer',
+  license_plate: '2345PQR',
+  brand: 'Peugeot',
+  model: 'Boxer',
+  year: 2021,
+  vehicle_type: 'van',
+  fuel_type: 'diesel',
+  is_electric: false,
+  tank_capacity_liters: 90,
+  initial_odometer_km: 18000,
+  current_odometer_km: 54320,
+  status: 'active'
 )
+puts "  ✓ #{tech_v2.license_plate} (Diesel)"
 
-vehicle9 = Vehicle.create!(
-  company_id: company2.id,
-  name: "EV Van 1",
-  license_plate: "1234YZA",
-  vin: "WF0EXXGCAE1234567",
-  brand: "Ford",
-  model: "E-Transit",
-  year: 2024,
-  fuel_type: "electric",
-  battery_capacity_kwh: 68.0,
-  is_active: true
+# Demo - 2 vehículos
+demo_v1 = Vehicle.create!(
+  tenant: demo,
+  name: 'Demo Diesel',
+  license_plate: 'DEMO001',
+  brand: 'Ford',
+  model: 'Transit',
+  year: 2023,
+  vehicle_type: 'van',
+  fuel_type: 'diesel',
+  is_electric: false,
+  tank_capacity_liters: 80,
+  initial_odometer_km: 1000,
+  current_odometer_km: 12500,
+  status: 'active'
 )
+puts "  ✓ #{demo_v1.license_plate} (Diesel)"
 
-vehicle10 = Vehicle.create!(
-  company_id: company2.id,
-  name: "EV Van 2",
-  license_plate: "5678BCD",
-  vin: "WF0EXXGCAE2345678",
-  brand: "Ford",
-  model: "E-Transit",
-  year: 2024,
-  fuel_type: "electric",
-  battery_capacity_kwh: 68.0,
-  is_active: true
+demo_v2 = Vehicle.create!(
+  tenant: demo,
+  name: 'Demo Eléctrico',
+  license_plate: 'DEMO002',
+  brand: 'Nissan',
+  model: 'e-NV200',
+  year: 2023,
+  vehicle_type: 'van',
+  fuel_type: 'electric',
+  is_electric: true,
+  battery_capacity_kwh: 40,
+  initial_odometer_km: 500,
+  current_odometer_km: 8750,
+  status: 'active'
 )
+puts "  ✓ #{demo_v2.license_plate} (Eléctrico)"
 
-# Vehículo inactivo
-vehicle11 = Vehicle.create!(
-  company_id: company3.id,
-  name: "Camión Viejo",
-  license_plate: "9876ZYX",
-  brand: "Iveco",
-  model: "Stralis",
-  year: 2015,
-  fuel_type: "combustion",
-  tank_capacity_liters: 400.0,
-  is_active: false
-)
+# ==============================================================================
+# FASE 5: MAPEOS
+# ==============================================================================
 
-combustion_vehicles = [ vehicle1, vehicle2, vehicle3, vehicle6 ]
-electric_vehicles = [ vehicle4, vehicle5, vehicle7, vehicle8, vehicle9, vehicle10 ]
-all_vehicles = [ vehicle1, vehicle2, vehicle3, vehicle4, vehicle5, vehicle6, vehicle7, vehicle8, vehicle9, vehicle10, vehicle11 ]
+puts "\n📦 FASE 5: Mapeos Vehículo-Proveedor"
+puts "-" * 80
 
-puts "  ✓ Creados 11 vehículos"
-
-# ============================================================================
-# CONFIGURACIONES DE TELEMETRÍA POR VEHÍCULO
-# ============================================================================
-puts "⚙️  Configurando telemetría de vehículos..."
-
-# Configurar vehículos de empresa 1 con Geotab
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle1.id,
-  telemetry_credential_id: credential1.id,
-  external_device_id: "b1A#{rand(100..999)}",
-  sync_frequency: "daily",
-  data_types: [ "refuels", "odometer" ],
+# Acme
+VehicleProviderMapping.create!(
+  vehicle: acme_v1,
+  tenant_integration_configuration: acme_geotab,
+  external_vehicle_id: 'b1',
+  external_vehicle_name: 'Ford Transit',
   is_active: true,
-  last_sync_at: 2.hours.ago
+  mapped_at: 15.days.ago,
+  last_sync_at: 6.hours.ago
 )
+puts "  ✓ #{acme_v1.license_plate} ↔ b1"
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle2.id,
-  telemetry_credential_id: credential1.id,
-  external_device_id: "b2A#{rand(100..999)}",
-  sync_frequency: "daily",
-  data_types: [ "refuels", "odometer" ],
+VehicleProviderMapping.create!(
+  vehicle: acme_v2,
+  tenant_integration_configuration: acme_geotab,
+  external_vehicle_id: 'b2',
+  external_vehicle_name: 'Mercedes Actros',
   is_active: true,
-  last_sync_at: 3.hours.ago
+  mapped_at: 15.days.ago,
+  last_sync_at: 6.hours.ago
 )
+puts "  ✓ #{acme_v2.license_plate} ↔ b2"
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle3.id,
-  telemetry_credential_id: credential1.id,
-  external_device_id: "b3A#{rand(100..999)}",
-  sync_frequency: "daily",
-  data_types: [ "refuels", "odometer" ],
+VehicleProviderMapping.create!(
+  vehicle: acme_v3,
+  tenant_integration_configuration: acme_geotab,
+  external_vehicle_id: 'b3E',
+  external_vehicle_name: 'Tesla Model 3',
   is_active: true,
-  last_sync_at: 1.hour.ago
+  mapped_at: 12.months.ago,
+  last_sync_at: 6.hours.ago
 )
+puts "  ✓ #{acme_v3.license_plate} ↔ b3E"
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle4.id,
-  telemetry_credential_id: credential1.id,
-  external_device_id: "b4A#{rand(100..999)}",
-  sync_frequency: "daily",
-  data_types: [ "charges", "odometer" ],
+# Tech
+VehicleProviderMapping.create!(
+  vehicle: tech_v1,
+  tenant_integration_configuration: tech_geotab,
+  external_vehicle_id: 'b10',
+  external_vehicle_name: 'Renault Master',
   is_active: true,
+  mapped_at: 7.days.ago,
+  last_sync_at: 8.hours.ago
+)
+puts "  ✓ #{tech_v1.license_plate} ↔ b10"
+
+VehicleProviderMapping.create!(
+  vehicle: tech_v2,
+  tenant_integration_configuration: tech_geotab,
+  external_vehicle_id: 'b11',
+  external_vehicle_name: 'Peugeot Boxer',
+  is_active: true,
+  mapped_at: 7.days.ago,
+  last_sync_at: 8.hours.ago
+)
+puts "  ✓ #{tech_v2.license_plate} ↔ b11"
+
+# Demo
+VehicleProviderMapping.create!(
+  vehicle: demo_v1,
+  tenant_integration_configuration: demo_geotab,
+  external_vehicle_id: 'demo_b1',
+  external_vehicle_name: 'Demo Diesel',
+  is_active: true,
+  mapped_at: 30.days.ago,
   last_sync_at: 4.hours.ago
 )
+puts "  ✓ #{demo_v1.license_plate} ↔ demo_b1"
 
-# Configurar vehículos de empresa 2 con Geotab (todos eléctricos)
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle7.id,
-  telemetry_credential_id: credential3.id,
-  external_device_id: "b10B#{rand(100..999)}",
-  sync_frequency: "hourly",
-  data_types: [ "charges", "odometer" ],
+VehicleProviderMapping.create!(
+  vehicle: demo_v2,
+  tenant_integration_configuration: demo_geotab,
+  external_vehicle_id: 'demo_b2E',
+  external_vehicle_name: 'Demo Electric',
   is_active: true,
-  last_sync_at: 30.minutes.ago
+  mapped_at: 30.days.ago,
+  last_sync_at: 4.hours.ago
 )
+puts "  ✓ #{demo_v2.license_plate} ↔ demo_b2E"
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle8.id,
-  telemetry_credential_id: credential3.id,
-  external_device_id: "b11B#{rand(100..999)}",
-  sync_frequency: "hourly",
-  data_types: [ "charges", "odometer" ],
-  is_active: true,
-  last_sync_at: 45.minutes.ago
-)
+# ==============================================================================
+# FASE 6: EJECUCIONES
+# ==============================================================================
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle9.id,
-  telemetry_credential_id: credential3.id,
-  external_device_id: "b12B#{rand(100..999)}",
-  sync_frequency: "hourly",
-  data_types: [ "charges", "odometer" ],
-  is_active: true,
-  last_sync_at: 20.minutes.ago
-)
+puts "\n📦 FASE 6: Ejecuciones de Sincronización"
+puts "-" * 80
 
-VehicleTelemetryConfig.create!(
-  vehicle_id: vehicle10.id,
-  telemetry_credential_id: credential3.id,
-  external_device_id: "b13B#{rand(100..999)}",
-  sync_frequency: "hourly",
-  data_types: [ "charges", "odometer" ],
-  is_active: true,
-  last_sync_at: 50.minutes.ago
-)
-
-puts "  ✓ Configuradas 8 conexiones de telemetría"
-
-# ============================================================================
-# REPOSTAJES (COMBUSTIÓN)
-# ============================================================================
-puts "⛽ Creando repostajes..."
-
-refuel_locations = [
-  { lat: 41.3851, lng: 2.1734, name: "Barcelona Centro" },
-  { lat: 41.4036, lng: 2.1744, name: "Barcelona Norte" },
-  { lat: 40.4168, lng: -3.7038, name: "Madrid Centro" },
-  { lat: 43.2630, lng: -2.9350, name: "Bilbao" },
-  { lat: 39.4699, lng: -0.3763, name: "Valencia" }
-]
-
-refuel_count = 0
-combustion_vehicles.each do |vehicle|
-  # 15-25 repostajes por vehículo en los últimos 3 meses
-  num_refuels = rand(15..25)
-
-  num_refuels.times do |i|
-    days_ago = rand(1..90)
-    base_odometer = 10000 + (90 - days_ago) * rand(150..300)
-    location = refuel_locations.sample
-
-    # Algunos repostajes con anomalías (5%)
-    has_anomaly = rand(100) < 5
-    volume = if has_anomaly
-      vehicle.tank_capacity_liters * rand(1.15..1.3) # Excede capacidad
-    else
-      rand(30.0..(vehicle.tank_capacity_liters * 0.95))
-    end
-
-    Refuel.create!(
-      vehicle_id: vehicle.id,
-      external_id: "geotab_fillup_#{vehicle.id}_#{SecureRandom.hex(8)}",
-      provider_name: "geotab",
-      refuel_date: days_ago.days.ago + rand(0..23).hours,
-      volume_liters: volume.round(2),
-      cost: (volume * rand(1.45..1.65)).round(2),
-      currency_code: "EUR",
-      location_lat: location[:lat] + rand(-0.05..0.05),
-      location_lng: location[:lng] + rand(-0.05..0.05),
-      odometer_km: base_odometer.round(2),
-      tank_capacity_liters: vehicle.tank_capacity_liters,
-      distance_since_last_refuel_km: rand(300..600).round(2),
-      confidence_level: has_anomaly ? "Low" : [ "High", "Medium" ].sample,
-      product_type: vehicle.fuel_type == "hybrid" ? "Gasoline" : [ "Diesel", "Diesel Plus" ].sample,
-      raw_data: {
-        device_id: "b#{vehicle.id}A",
-        timestamp: days_ago.days.ago.iso8601,
-        source: "geotab_api"
-      }
-    )
-    refuel_count += 1
-  end
-end
-
-puts "  ✓ Creados #{refuel_count} repostajes"
-
-# ============================================================================
-# CARGAS ELÉCTRICAS
-# ============================================================================
-puts "🔋 Creando cargas eléctricas..."
-
-charge_locations = [
-  { lat: 41.3879, lng: 2.1699, name: "Supercharger Barcelona" },
-  { lat: 40.4165, lng: -3.7026, name: "Punto carga Madrid" },
-  { lat: 43.2627, lng: -2.9253, name: "Electrolinera Bilbao" },
-  { lat: 39.4840, lng: -0.3386, name: "Carga rápida Valencia" }
-]
-
-charge_count = 0
-electric_vehicles.each do |vehicle|
-  # 20-40 cargas por vehículo en los últimos 3 meses
-  num_charges = rand(20..40)
-
-  num_charges.times do |i|
-    days_ago = rand(1..90)
-    base_odometer = 5000 + (90 - days_ago) * rand(50..150)
-    location = charge_locations.sample
-
-    # Distribución: 70% AC (lento), 30% DC (rápido)
-    charge_type = rand(100) < 70 ? "AC" : "DC"
-
-    if charge_type == "AC"
-      # Carga lenta AC: 3-8 horas, 20-60 kWh
-      duration = rand(180..480)
-      energy = rand(20.0..60.0)
-      power = (energy / (duration / 60.0)).round(3)
-    else
-      # Carga rápida DC: 15-45 minutos, 30-70 kWh
-      duration = rand(15..45)
-      energy = rand(30.0..70.0)
-      power = (energy / (duration / 60.0)).round(3)
-    end
-
-    start_soc = rand(10..30).to_f
-    end_soc = [ start_soc + rand(40..70), 100.0 ].min
-
-    # Algunas cargas con baja eficiencia (10%)
-    has_low_efficiency = rand(100) < 10
-    charger_energy = energy / (has_low_efficiency ? rand(0.70..0.78) : rand(0.88..0.95))
-
-    ElectricCharge.create!(
-      vehicle_id: vehicle.id,
-      external_id: "geotab_charge_#{vehicle.id}_#{SecureRandom.hex(8)}",
-      provider_name: "geotab",
-      start_time: days_ago.days.ago + rand(0..23).hours,
-      duration_minutes: duration,
-      energy_consumed_kwh: energy.round(3),
-      start_soc_percent: start_soc.round(2),
-      end_soc_percent: end_soc.round(2),
-      charge_type: charge_type,
-      charge_is_estimated: [ true, false ].sample,
-      location_lat: location[:lat] + rand(-0.02..0.02),
-      location_lng: location[:lng] + rand(-0.02..0.02),
-      odometer_km: base_odometer.round(2),
-      peak_power_kw: power.round(3),
-      measured_charger_energy_in_kwh: charger_energy.round(3),
-      measured_battery_energy_in_kwh: energy.round(3),
-      raw_data: {
-        device_id: "b#{vehicle.id}B",
-        timestamp: days_ago.days.ago.iso8601,
-        source: "geotab_api"
-      }
-    )
-    charge_count += 1
-  end
-end
-
-puts "  ✓ Creadas #{charge_count} cargas eléctricas"
-
-# ============================================================================
-# LOGS DE SINCRONIZACIÓN
-# ============================================================================
-puts "📝 Creando logs de sincronización..."
-
-# Logs exitosos recientes
-log1 = TelemetrySyncLog.create!(
-  telemetry_credential_id: credential1.id,
-  vehicle_id: nil,
-  sync_type: "refuels",
-  status: "success",
-  records_processed: 45,
-  records_created: 42,
-  records_updated: 2,
-  records_skipped: 1,
-  started_at: 2.hours.ago,
-  completed_at: 2.hours.ago + 15.seconds
-)
-
-log2 = TelemetrySyncLog.create!(
-  telemetry_credential_id: credential1.id,
-  vehicle_id: nil,
-  sync_type: "charges",
-  status: "success",
-  records_processed: 60,
-  records_created: 58,
-  records_updated: 1,
-  records_skipped: 1,
-  started_at: 2.hours.ago + 1.minute,
-  completed_at: 2.hours.ago + 1.minute + 22.seconds
-)
-
-log3 = TelemetrySyncLog.create!(
-  telemetry_credential_id: credential3.id,
-  vehicle_id: nil,
-  sync_type: "charges",
-  status: "success",
-  records_processed: 75,
-  records_created: 72,
-  records_updated: 2,
-  records_skipped: 1,
-  started_at: 30.minutes.ago,
-  completed_at: 30.minutes.ago + 28.seconds
-)
-
-# Log con error parcial
-error_log = TelemetrySyncLog.create!(
-  telemetry_credential_id: credential1.id,
-  vehicle_id: nil,
-  sync_type: "refuels",
-  status: "partial",
-  records_processed: 50,
-  records_created: 42,
-  records_updated: 3,
-  records_skipped: 5,
-  error_message: "Some records failed validation",
-  started_at: 1.day.ago,
-  completed_at: 1.day.ago + 25.seconds
-)
-
-# Log con error completo
-failed_log = TelemetrySyncLog.create!(
-  telemetry_credential_id: credential2.id,
-  vehicle_id: vehicle1.id,
-  sync_type: "charges",
-  status: "error",
-  records_processed: 0,
-  records_created: 0,
-  records_updated: 0,
+acme_fuel_exec = IntegrationSyncExecution.create!(
+  tenant_integration_configuration: acme_geotab,
+  feature_key: 'fuel',
+  trigger_type: 'scheduled',
+  status: 'completed',
+  started_at: 6.hours.ago,
+  finished_at: 6.hours.ago + 45.seconds,
+  duration_seconds: 45,
+  records_fetched: 5,
+  records_processed: 5,
+  records_failed: 0,
   records_skipped: 0,
-  error_message: "Authentication failed: Invalid credentials",
-  error_details: {
-    error_code: "AUTH_001",
-    provider_message: "Session expired"
-  },
-  started_at: 3.days.ago,
-  completed_at: 3.days.ago + 2.seconds
+  metadata: {}
 )
+puts "  ✓ Acme Fuel (completada)"
 
-puts "  ✓ Creados 5 logs de sincronización"
-
-# ============================================================================
-# ERRORES DE NORMALIZACIÓN
-# ============================================================================
-puts "⚠️  Creando errores de normalización..."
-
-# Errores asociados al log parcial
-TelemetryNormalizationError.create!(
-  telemetry_sync_log_id: error_log.id,
-  error_type: "validation_error",
-  error_message: "Volume exceeds tank capacity by 25%",
-  raw_data: {
-    id: "geotab_error_1",
-    volume: 105.0,
-    tankCapacity: 80.0,
-    device: { id: "b1A" }
-  },
-  provider_name: "geotab",
-  data_type: "refuel",
-  resolved: false
+acme_battery_exec = IntegrationSyncExecution.create!(
+  tenant_integration_configuration: acme_geotab,
+  feature_key: 'battery',
+  trigger_type: 'scheduled',
+  status: 'completed',
+  started_at: 6.hours.ago + 1.minute,
+  finished_at: 6.hours.ago + 1.minute + 30.seconds,
+  duration_seconds: 30,
+  records_fetched: 8,
+  records_processed: 8,
+  records_failed: 0,
+  records_skipped: 0,
+  metadata: {}
 )
+puts "  ✓ Acme Battery (completada)"
 
-TelemetryNormalizationError.create!(
-  telemetry_sync_log_id: error_log.id,
-  error_type: "mapping_error",
-  error_message: "Vehicle not found for device XYZ123",
-  raw_data: {
-    id: "geotab_error_2",
-    device: { id: "XYZ123" },
-    dateTime: "2025-01-01T10:00:00Z"
-  },
-  provider_name: "geotab",
-  data_type: "refuel",
-  resolved: false
+tech_fuel_exec = IntegrationSyncExecution.create!(
+  tenant_integration_configuration: tech_geotab,
+  feature_key: 'fuel',
+  trigger_type: 'scheduled',
+  status: 'completed',
+  started_at: 8.hours.ago,
+  finished_at: 8.hours.ago + 25.seconds,
+  duration_seconds: 25,
+  records_fetched: 3,
+  records_processed: 3,
+  records_failed: 0,
+  records_skipped: 0,
+  metadata: {}
 )
+puts "  ✓ Tech Fuel (completada)"
 
-TelemetryNormalizationError.create!(
-  telemetry_sync_log_id: error_log.id,
-  error_type: "data_format_error",
-  error_message: "Invalid date format: '2025-13-45T99:99:99Z'",
-  raw_data: {
-    id: "geotab_error_3",
-    dateTime: "2025-13-45T99:99:99Z",
-    volume: 45.5
-  },
-  provider_name: "geotab",
-  data_type: "refuel",
-  resolved: true,
-  resolved_at: 1.day.ago,
-  resolution_notes: "Data corrected manually by admin"
+demo_fuel_exec = IntegrationSyncExecution.create!(
+  tenant_integration_configuration: demo_geotab,
+  feature_key: 'fuel',
+  trigger_type: 'manual',
+  status: 'completed',
+  started_at: 4.hours.ago,
+  finished_at: 4.hours.ago + 20.seconds,
+  duration_seconds: 20,
+  records_fetched: 3,
+  records_processed: 3,
+  records_failed: 0,
+  records_skipped: 0,
+  metadata: {}
 )
+puts "  ✓ Demo Fuel (completada)"
 
-puts "  ✓ Creados 3 errores de normalización"
+demo_battery_exec = IntegrationSyncExecution.create!(
+  tenant_integration_configuration: demo_geotab,
+  feature_key: 'battery',
+  trigger_type: 'manual',
+  status: 'completed',
+  started_at: 4.hours.ago + 30.seconds,
+  finished_at: 4.hours.ago + 45.seconds,
+  duration_seconds: 15,
+  records_fetched: 2,
+  records_processed: 2,
+  records_failed: 0,
+  records_skipped: 0,
+  metadata: {}
+)
+puts "  ✓ Demo Battery (completada)"
 
-# ============================================================================
+# ==============================================================================
+# FASE 7: DATOS RAW
+# ==============================================================================
+
+puts "\n📦 FASE 7: Datos RAW"
+puts "-" * 80
+
+# Acme Fuel (5 registros)
+acme_fuel_raws = []
+5.times do |i|
+  days_ago = 25 - (i * 5)
+  device_id = i < 3 ? 'b1' : 'b2'
+
+  raw = IntegrationRawData.create!(
+    integration_sync_execution: acme_fuel_exec,
+    tenant_integration_configuration: acme_geotab,
+    provider_slug: 'geotab',
+    feature_key: 'fuel',
+    external_id: "fillup_acme_#{i+1}",
+    raw_data: {
+      id: "fillup_acme_#{i+1}",
+      device: { id: device_id },
+      dateTime: days_ago.days.ago.iso8601,
+      volume: (40 + rand(20)).round(2),
+      cost: (50 + rand(30)).round(2),
+      currencyCode: 'EUR',
+      location: { x: 2.1786, y: 41.3874 },
+      odometer: 40000 + (i * 1500)
+    },
+    processing_status: 'normalized',
+    normalized_record_type: 'VehicleRefueling'
+  )
+  acme_fuel_raws << raw
+end
+puts "  ✓ 5 RAW Fuel Acme"
+
+# Acme Battery (8 registros)
+acme_battery_raws = []
+8.times do |i|
+  days_ago = 28 - (i * 3)
+
+  raw = IntegrationRawData.create!(
+    integration_sync_execution: acme_battery_exec,
+    tenant_integration_configuration: acme_geotab,
+    provider_slug: 'geotab',
+    feature_key: 'battery',
+    external_id: "charge_acme_#{i+1}",
+    raw_data: {
+      id: "charge_acme_#{i+1}",
+      device: { id: 'b3E' },
+      startTime: days_ago.days.ago.change(hour: 22).iso8601,
+      duration: "03:#{15+rand(30)}:00",
+      energyConsumedKwh: (10 + rand(15)).round(3),
+      startStateOfCharge: (20 + rand(30)).round(2),
+      endStateOfCharge: (70 + rand(25)).round(2),
+      chargeType: rand > 0.7 ? 'DC' : 'AC',
+      location: { x: 2.1786, y: 41.3874 }
+    },
+    processing_status: 'normalized',
+    normalized_record_type: 'VehicleElectricCharge'
+  )
+  acme_battery_raws << raw
+end
+puts "  ✓ 8 RAW Battery Acme"
+
+# Tech Fuel (3 registros)
+tech_fuel_raws = []
+3.times do |i|
+  days_ago = 22 - (i * 7)
+  device_id = i < 2 ? 'b10' : 'b11'
+
+  raw = IntegrationRawData.create!(
+    integration_sync_execution: tech_fuel_exec,
+    tenant_integration_configuration: tech_geotab,
+    provider_slug: 'geotab',
+    feature_key: 'fuel',
+    external_id: "fillup_tech_#{i+1}",
+    raw_data: {
+      id: "fillup_tech_#{i+1}",
+      device: { id: device_id },
+      dateTime: days_ago.days.ago.iso8601,
+      volume: (50 + rand(25)).round(2),
+      cost: (60 + rand(35)).round(2),
+      currencyCode: 'EUR',
+      location: { x: 2.1786, y: 41.3874 },
+      odometer: 60000 + (i * 2000)
+    },
+    processing_status: 'normalized',
+    normalized_record_type: 'VehicleRefueling'
+  )
+  tech_fuel_raws << raw
+end
+puts "  ✓ 3 RAW Fuel Tech"
+
+# Demo Fuel (3 registros)
+demo_fuel_raws = []
+3.times do |i|
+  days_ago = 20 - (i * 7)
+
+  raw = IntegrationRawData.create!(
+    integration_sync_execution: demo_fuel_exec,
+    tenant_integration_configuration: demo_geotab,
+    provider_slug: 'geotab',
+    feature_key: 'fuel',
+    external_id: "fillup_demo_#{i+1}",
+    raw_data: {
+      id: "fillup_demo_#{i+1}",
+      device: { id: 'demo_b1' },
+      dateTime: days_ago.days.ago.iso8601,
+      volume: (45 + rand(15)).round(2),
+      cost: (55 + rand(25)).round(2),
+      currencyCode: 'EUR',
+      location: { x: 2.1786, y: 41.3874 },
+      odometer: 10000 + (i * 800)
+    },
+    processing_status: 'normalized',
+    normalized_record_type: 'VehicleRefueling'
+  )
+  demo_fuel_raws << raw
+end
+puts "  ✓ 3 RAW Fuel Demo"
+
+# Demo Battery (2 registros)
+demo_battery_raws = []
+2.times do |i|
+  days_ago = 15 - (i * 7)
+
+  raw = IntegrationRawData.create!(
+    integration_sync_execution: demo_battery_exec,
+    tenant_integration_configuration: demo_geotab,
+    provider_slug: 'geotab',
+    feature_key: 'battery',
+    external_id: "charge_demo_#{i+1}",
+    raw_data: {
+      id: "charge_demo_#{i+1}",
+      device: { id: 'demo_b2E' },
+      startTime: days_ago.days.ago.change(hour: 20).iso8601,
+      duration: "03:15:00",
+      energyConsumedKwh: (18 + rand(8)).round(3),
+      startStateOfCharge: 25.0,
+      endStateOfCharge: 95.0,
+      chargeType: 'AC',
+      location: { x: 2.1786, y: 41.3874 }
+    },
+    processing_status: 'normalized',
+    normalized_record_type: 'VehicleElectricCharge'
+  )
+  demo_battery_raws << raw
+end
+puts "  ✓ 2 RAW Battery Demo"
+
+# ==============================================================================
+# FASE 8: REPOSTAJES
+# ==============================================================================
+
+puts "\n📦 FASE 8: Repostajes Normalizados"
+puts "-" * 80
+
+# Acme
+acme_fuel_raws.each do |raw|
+  vehicle = raw.raw_data['device']['id'] == 'b1' ? acme_v1 : acme_v2
+
+  refuel = VehicleRefueling.create!(
+    tenant: acme,
+    vehicle: vehicle,
+    integration_raw_data: raw,
+    refueling_date: Time.parse(raw.raw_data['dateTime']),
+    volume_liters: raw.raw_data['volume'],
+    cost: raw.raw_data['cost'],
+    currency: raw.raw_data['currencyCode'],
+    location_lat: raw.raw_data.dig('location', 'y'),
+    location_lng: raw.raw_data.dig('location', 'x'),
+    odometer_km: raw.raw_data['odometer'],
+    fuel_type: 'Diesel',
+    is_estimated: false,
+    tank_capacity_liters: vehicle.tank_capacity_liters
+  )
+
+  raw.update!(normalized_record_id: refuel.id)
+end
+puts "  ✓ 5 repostajes Acme"
+
+# Tech
+tech_fuel_raws.each do |raw|
+  vehicle = raw.raw_data['device']['id'] == 'b10' ? tech_v1 : tech_v2
+
+  refuel = VehicleRefueling.create!(
+    tenant: tech,
+    vehicle: vehicle,
+    integration_raw_data: raw,
+    refueling_date: Time.parse(raw.raw_data['dateTime']),
+    volume_liters: raw.raw_data['volume'],
+    cost: raw.raw_data['cost'],
+    currency: raw.raw_data['currencyCode'],
+    location_lat: raw.raw_data.dig('location', 'y'),
+    location_lng: raw.raw_data.dig('location', 'x'),
+    odometer_km: raw.raw_data['odometer'],
+    fuel_type: 'Diesel',
+    is_estimated: false,
+    tank_capacity_liters: vehicle.tank_capacity_liters
+  )
+
+  raw.update!(normalized_record_id: refuel.id)
+end
+puts "  ✓ 3 repostajes Tech"
+
+# Demo
+demo_fuel_raws.each do |raw|
+  refuel = VehicleRefueling.create!(
+    tenant: demo,
+    vehicle: demo_v1,
+    integration_raw_data: raw,
+    refueling_date: Time.parse(raw.raw_data['dateTime']),
+    volume_liters: raw.raw_data['volume'],
+    cost: raw.raw_data['cost'],
+    currency: raw.raw_data['currencyCode'],
+    location_lat: raw.raw_data.dig('location', 'y'),
+    location_lng: raw.raw_data.dig('location', 'x'),
+    odometer_km: raw.raw_data['odometer'],
+    fuel_type: 'Diesel',
+    is_estimated: false,
+    tank_capacity_liters: demo_v1.tank_capacity_liters
+  )
+
+  raw.update!(normalized_record_id: refuel.id)
+end
+puts "  ✓ 3 repostajes Demo"
+
+# ==============================================================================
+# FASE 9: CARGAS ELÉCTRICAS
+# ==============================================================================
+
+puts "\n📦 FASE 9: Cargas Eléctricas Normalizadas"
+puts "-" * 80
+
+# Acme
+acme_battery_raws.each do |raw|
+  duration_parts = raw.raw_data['duration'].split(':')
+  duration_minutes = (duration_parts[0].to_i * 60) + duration_parts[1].to_i
+
+  charge = VehicleElectricCharge.create!(
+    tenant: acme,
+    vehicle: acme_v3,
+    integration_raw_data: raw,
+    charge_start_time: Time.parse(raw.raw_data['startTime']),
+    duration_minutes: duration_minutes,
+    energy_consumed_kwh: raw.raw_data['energyConsumedKwh'],
+    start_soc_percent: raw.raw_data['startStateOfCharge'],
+    end_soc_percent: raw.raw_data['endStateOfCharge'],
+    charge_type: raw.raw_data['chargeType'],
+    location_lat: raw.raw_data.dig('location', 'y'),
+    location_lng: raw.raw_data.dig('location', 'x'),
+    is_estimated: false
+  )
+
+  raw.update!(normalized_record_id: charge.id)
+end
+puts "  ✓ 8 cargas Acme Tesla"
+
+# Demo
+demo_battery_raws.each do |raw|
+  duration_parts = raw.raw_data['duration'].split(':')
+  duration_minutes = (duration_parts[0].to_i * 60) + duration_parts[1].to_i
+
+  charge = VehicleElectricCharge.create!(
+    tenant: demo,
+    vehicle: demo_v2,
+    integration_raw_data: raw,
+    charge_start_time: Time.parse(raw.raw_data['startTime']),
+    duration_minutes: duration_minutes,
+    energy_consumed_kwh: raw.raw_data['energyConsumedKwh'],
+    start_soc_percent: raw.raw_data['startStateOfCharge'],
+    end_soc_percent: raw.raw_data['endStateOfCharge'],
+    charge_type: raw.raw_data['chargeType'],
+    location_lat: raw.raw_data.dig('location', 'y'),
+    location_lng: raw.raw_data.dig('location', 'x'),
+    is_estimated: false
+  )
+
+  raw.update!(normalized_record_id: charge.id)
+end
+puts "  ✓ 2 cargas Demo"
+
+# ==============================================================================
 # RESUMEN
-# ============================================================================
-puts ""
-puts "=" * 70
+# ==============================================================================
+
+puts "\n" + "="*80
 puts "✅ SEEDS COMPLETADOS"
-puts "=" * 70
-puts ""
-puts "📊 Resumen de datos creados:"
-puts "  • Proveedores de telemetría: 3"
-puts "  • Empresas: 3"
-puts "  • Credenciales: 3"
-puts "  • Vehículos totales: 11"
-puts "    - Combustión: 3"
-puts "    - Eléctricos: 6"
-puts "    - Híbridos: 1"
-puts "    - Inactivos: 1"
-puts "  • Configuraciones de telemetría: 8"
-puts "  • Repostajes: #{refuel_count}"
-puts "  • Cargas eléctricas: #{charge_count}"
-puts "  • Logs de sincronización: 5"
-puts "  • Errores de normalización: 3"
-puts ""
-puts "🔐 Credenciales de prueba (empresa 1):"
-puts "  Provider: Geotab"
-puts "  Username: user@elrapido.com"
-puts "  Password: SecurePass123!"
-puts "  Database: elrapido_db"
-puts ""
-puts "🏢 Empresas creadas:"
-puts "  1. Transportes El Rápido S.L. (ID: #{company1.id})"
-puts "  2. Logística Verde S.A. (ID: #{company2.id})"
-puts "  3. Distribuciones del Norte (ID: #{company3.id})"
-puts ""
-puts "🚀 Para ejecutar los seeds:"
-puts "  rails db"
+puts "="*80
+
+puts "\n📊 RESUMEN:\n"
+puts "   Categorías: #{IntegrationCategory.count}"
+puts "   Proveedores: #{IntegrationProvider.count}"
+puts "   Auth Schemas: #{IntegrationAuthSchema.count}"
+puts "   Features: #{IntegrationFeature.count}"
+puts "   Tenants: #{Tenant.count}"
+puts "   Configuraciones: #{TenantIntegrationConfiguration.count}"
+puts "   Vehículos: #{Vehicle.count}"
+puts "   Mapeos: #{VehicleProviderMapping.count}"
+puts "   Ejecuciones: #{IntegrationSyncExecution.count}"
+puts "   Datos RAW: #{IntegrationRawData.count}"
+puts "   Repostajes: #{VehicleRefueling.count}"
+puts "   Cargas: #{VehicleElectricCharge.count}"
+
+puts "\n💡 Consultas de ejemplo:"
+puts "   acme = Tenant.find_by(slug: 'acme-corp')"
+puts "   acme.vehicles"
+puts "   acme.tenant_integration_configurations"
+puts "   acme.vehicles.first.vehicle_refuelings"
+puts "   Vehicle.find_by(license_plate: '9012GHI').vehicle_electric_charges"
+
+puts "\n" + "="*80 + "\n"

@@ -38,11 +38,13 @@ module V1
     end
 
 
-    mount V1::TelemetryProvidersApi
-    mount V1::TelemetryCredentialsApi
-    mount V1::TelemetrySyncApi
-    mount V1::VehicleTelemetryApi
+    mount V1::MarketplaceApi
+    mount V1::TenantIntegrationConfigurationsApi
     mount V1::VehiclesApi
+    mount V1::VehicleProviderMappingsApi
+    mount V1::SyncExecutionsApi
+    mount V1::VehicleRefuelingsApi
+    mount V1::VehicleElectricChargesApi
 
     # Configuración mínima de Swagger
     add_swagger_documentation(

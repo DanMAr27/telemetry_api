@@ -1,278 +1,665 @@
-# app/models/company.rb
-class Company < ApplicationRecord
+# app/models/integration_category.rb
+class IntegrationCategory < ApplicationRecord
   # Associations
-  has_many :vehicles, dependent: :destroy
-  has_many :telemetry_credentials, dependent: :destroy
-  has_many :telemetry_providers, through: :telemetry_credentials
+  has_many :integration_providers, dependent: :destroy
 
   # Validations
-  validates :name, presence: true
-  validates :tax_id, uniqueness: true, allow_nil: true
-  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_nil: true
+  validates :name, presence: true, length: { maximum: 100 }
+  validates :slug, presence: true,
+                   length: { maximum: 50 },
+                   uniqueness: true,
+                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
+  validates :icon, length: { maximum: 50 }, allow_blank: true
+  validates :display_order, presence: true, numericality: { only_integer: true }
 
   # Scopes
   scope :active, -> { where(is_active: true) }
-  scope :inactive, -> { where(is_active: false) }
+  scope :ordered, -> { order(display_order: :asc, name: :asc) }
+  scope :for_marketplace, -> { active.ordered }
 
-  # Instance methods
-  def active_vehicles
-    vehicles.active
-  end
+  # Callbacks
+  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
 
-  def vehicles_with_telemetry
-    vehicles.with_telemetry
-  end
+  private
 
-  def vehicles_without_telemetry
-    vehicles.without_telemetry
-  end
-
-  def has_telemetry_provider?(provider_slug)
-    telemetry_credentials.joins(:telemetry_provider)
-                        .where(telemetry_providers: { slug: provider_slug })
-                        .active
-                        .exists?
-  end
-
-  def telemetry_credential_for(provider_slug)
-    telemetry_credentials.joins(:telemetry_provider)
-                        .where(telemetry_providers: { slug: provider_slug })
-                        .active
-                        .first
+  def generate_slug
+    self.slug = name.parameterize.underscore
   end
 end
-# app/models/electric_charge.rb
-class ElectricCharge < ApplicationRecord
+
+# app/models/integration_provider.rb
+class IntegrationProvider < ApplicationRecord
   # Associations
-  belongs_to :vehicle
+  belongs_to :integration_category
+  has_one :integration_auth_schema, dependent: :destroy
+  has_many :integration_features, dependent: :destroy
 
   # Validations
-  validates :external_id, presence: true
-  validates :provider_name, presence: true
-  validates :start_time, presence: true
-  validates :external_id, uniqueness: { scope: [ :vehicle_id, :provider_name ] }
-  validates :energy_consumed_kwh, numericality: { greater_than: 0 }, allow_nil: true
-  validates :start_soc_percent, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 100 }, allow_nil: true
-  validates :end_soc_percent, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: 100 }, allow_nil: true
-  validates :charge_type, inclusion: { in: %w[AC DC], allow_nil: true }
-
-  # Scopes
-  scope :recent, -> { order(start_time: :desc) }
-  scope :by_provider, ->(provider) { where(provider_name: provider) }
-  scope :in_date_range, ->(from, to) { where(start_time: from..to) }
-  scope :for_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
-  scope :ac_charges, -> { where(charge_type: "AC") }
-  scope :dc_charges, -> { where(charge_type: "DC") }
-  scope :with_location, -> { where.not(location_lat: nil, location_lng: nil) }
-
-  # Instance methods
-  def has_location?
-    location_lat.present? && location_lng.present?
-  end
-
-  def coordinates
-    return nil unless has_location?
-    [ location_lat, location_lng ]
-  end
-
-  def soc_gained_percent
-    return nil if start_soc_percent.nil? || end_soc_percent.nil?
-    end_soc_percent - start_soc_percent
-  end
-
-  def charging_efficiency_percent
-    return nil if measured_charger_energy_in_kwh.nil? || measured_battery_energy_in_kwh.nil?
-    return nil if measured_charger_energy_in_kwh.zero?
-
-    (measured_battery_energy_in_kwh / measured_charger_energy_in_kwh) * 100
-  end
-
-  def duration_hours
-    return nil if duration_minutes.nil?
-    duration_minutes / 60.0
-  end
-
-  def average_power_kw
-    return nil if energy_consumed_kwh.nil? || duration_hours.nil?
-    return nil if duration_hours.zero?
-
-    energy_consumed_kwh / duration_hours
-  end
-
-  # Detectores de anomalías
-  def low_efficiency?
-    return false if charging_efficiency_percent.nil?
-    charging_efficiency_percent < 80 # Menos del 80% es sospechoso
-  end
-
-  def fast_charge?
-    charge_type == "DC"
-  end
-
-  def slow_charge?
-    charge_type == "AC"
-  end
-end
-# app/models/refuel.rb
-class Refuel < ApplicationRecord
-  # Associations
-  belongs_to :vehicle
-
-  # Validations
-  validates :external_id, presence: true
-  validates :provider_name, presence: true
-  validates :refuel_date, presence: true
-  validates :external_id, uniqueness: { scope: [ :vehicle_id, :provider_name ] }
-  validates :volume_liters, numericality: { greater_than: 0 }, allow_nil: true
-  validates :cost, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
-
-  # Scopes
-  scope :recent, -> { order(refuel_date: :desc) }
-  scope :by_provider, ->(provider) { where(provider_name: provider) }
-  scope :in_date_range, ->(from, to) { where(refuel_date: from..to) }
-  scope :for_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
-  scope :with_location, -> { where.not(location_lat: nil, location_lng: nil) }
-
-  # Instance methods
-  def has_location?
-    location_lat.present? && location_lng.present?
-  end
-
-  def coordinates
-    return nil unless has_location?
-    [ location_lat, location_lng ]
-  end
-
-  def consumption_per_100km
-    return nil if volume_liters.nil? || distance_since_last_refuel_km.nil?
-    return nil if distance_since_last_refuel_km.zero?
-
-    (volume_liters / distance_since_last_refuel_km) * 100
-  end
-
-  # Detectores de anomalías básicos
-  def exceeds_tank_capacity?
-    return false if volume_liters.nil? || tank_capacity_liters.nil?
-    volume_liters > tank_capacity_liters * 1.1 # 10% de margen
-  end
-
-  def suspicious_location?
-    # TODO: Implementar lógica de zonas autorizadas
-    false
-  end
-end
-# app/models/telemetry_credential.rb
-class TelemetryCredential < ApplicationRecord
-  # Encriptación (requiere gem 'attr_encrypted' o Rails 7+ encrypts)
-  # Opción 1: attr_encrypted gem
-  # attr_encrypted :credentials, key: Rails.application.credentials.dig(:encryption, :key)
-  attr_encrypted :credentials, key: ENV["ENCRYPTION_KEY"]
-
-  # Opción 2: Rails 7+ (comentar si usas attr_encrypted)
-  # encrypts :credentials
-
-  # Associations
-  belongs_to :company
-  belongs_to :telemetry_provider
-  has_many :vehicle_telemetry_configs, dependent: :destroy
-  has_many :vehicles, through: :vehicle_telemetry_configs
-  has_many :telemetry_sync_logs, dependent: :destroy
-
-  # Validations
-  validates :company_id, uniqueness: { scope: :telemetry_provider_id,
-                                       message: "already has credentials for this provider" }
-  validates :credentials, presence: true
+  validates :name, presence: true, length: { maximum: 100 }
+  validates :slug, presence: true,
+                   length: { maximum: 50 },
+                   uniqueness: true,
+                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
+  validates :status, presence: true,
+                     inclusion: { in: %w[active coming_soon deprecated beta] }
+  validates :api_base_url, length: { maximum: 500 }, allow_blank: true
+  validates :logo_url, length: { maximum: 500 }, allow_blank: true
+  validates :website_url, length: { maximum: 500 }, allow_blank: true
+  validates :display_order, presence: true, numericality: { only_integer: true }
 
   # Scopes
   scope :active, -> { where(is_active: true) }
-  scope :for_provider, ->(provider_slug) {
-    joins(:telemetry_provider).where(telemetry_providers: { slug: provider_slug })
-  }
-  scope :needs_sync, -> {
-    where("last_sync_at IS NULL OR last_sync_at < ?", 1.hour.ago)
-  }
+  scope :by_status, ->(status) { where(status: status) }
+  scope :premium, -> { where(is_premium: true) }
+  scope :free, -> { where(is_premium: false) }
+  scope :ordered, -> { order(display_order: :asc, name: :asc) }
+  scope :for_marketplace, -> { active.where(status: [ "active", "beta" ]).ordered }
+
+  # Callbacks
+  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
 
   # Instance methods
-  def credentials_hash
-    # Deserializa las credenciales encriptadas
-    JSON.parse(credentials).with_indifferent_access
-  rescue JSON::ParserError
-    {}
+  def available?
+    is_active && status.in?([ "active", "beta" ])
   end
 
-  def update_sync_timestamp!(successful: true)
-    attributes = { last_sync_at: Time.current }
-    attributes[:last_successful_sync_at] = Time.current if successful
-    update!(attributes)
+  def ready_for_production?
+    is_active && status == "active"
   end
 
-  def provider_name
-    telemetry_provider.slug
-  end
+  private
 
-  def from_date_for_sync
-    # Fecha desde la cual sincronizar (última exitosa o 30 días atrás)
-    last_successful_sync_at || 30.days.ago
+  def generate_slug
+    self.slug = name.parameterize.underscore
   end
 end
-# app/models/telemetry_normalization_error.rb
-class TelemetryNormalizationError < ApplicationRecord
+
+# app/models/integration_auth_schema.rb
+class IntegrationAuthSchema < ApplicationRecord
   # Associations
-  belongs_to :telemetry_sync_log
+  belongs_to :integration_provider
 
   # Validations
-  validates :error_type, presence: true, inclusion: { in: %w[validation_error mapping_error data_format_error unknown] }
-  validates :error_message, presence: true
+  validates :auth_fields, presence: true
+  validates :integration_provider_id, uniqueness: {
+    scope: :is_active,
+    conditions: -> { where(is_active: true) },
+    message: "ya tiene un schema de autenticación activo"
+  }, if: :is_active?
+
+  # Validación personalizada para auth_fields
+  validate :validate_auth_fields_structure
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+
+  # Instance methods
+  def field_names
+    return [] unless auth_fields.is_a?(Array)
+    auth_fields.map { |field| field["name"] }.compact
+  end
+
+  def required_fields
+    return [] unless auth_fields.is_a?(Array)
+    auth_fields.select { |field| field["required"] == true }
+  end
+
+  private
+
+  def validate_auth_fields_structure
+    return if auth_fields.blank?
+
+    unless auth_fields.is_a?(Array)
+      errors.add(:auth_fields, "debe ser un array")
+      return
+    end
+
+    auth_fields.each_with_index do |field, index|
+      unless field.is_a?(Hash)
+        errors.add(:auth_fields, "el elemento #{index} debe ser un objeto")
+        next
+      end
+
+      # Validar campos requeridos
+      required_keys = [ "name", "type", "label" ]
+      missing_keys = required_keys - field.keys
+
+      if missing_keys.any?
+        errors.add(:auth_fields, "el campo #{index} requiere: #{missing_keys.join(', ')}")
+      end
+
+      # Validar tipos permitidos
+      valid_types = [ "text", "password", "url", "select" ]
+      if field["type"].present? && !valid_types.include?(field["type"])
+        errors.add(:auth_fields, "tipo '#{field['type']}' no válido en campo #{index}")
+      end
+    end
+  end
+end
+
+# app/models/integration_feature.rb
+class IntegrationFeature < ApplicationRecord
+  # Associations
+  belongs_to :integration_provider
+
+  # Validations
+  validates :feature_key, presence: true,
+                          length: { maximum: 50 },
+                          format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" },
+                          uniqueness: { scope: :integration_provider_id }
+  validates :feature_name, presence: true, length: { maximum: 100 }
+  validates :display_order, presence: true, numericality: { only_integer: true }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :ordered, -> { order(display_order: :asc, feature_name: :asc) }
+
+  # Instance methods
+  def available?
+    is_active
+  end
+end
+# app/models/integration_category.rb
+class IntegrationCategory < ApplicationRecord
+  # Associations
+  has_many :integration_providers, dependent: :destroy
+
+  # Validations
+  validates :name, presence: true, length: { maximum: 100 }
+  validates :slug, presence: true,
+                   length: { maximum: 50 },
+                   uniqueness: true,
+                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
+  validates :icon, length: { maximum: 50 }, allow_blank: true
+  validates :display_order, presence: true, numericality: { only_integer: true }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :ordered, -> { order(display_order: :asc, name: :asc) }
+  scope :for_marketplace, -> { active.ordered }
+
+  # Callbacks
+  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
+
+  private
+
+  def generate_slug
+    self.slug = name.parameterize.underscore
+  end
+end
+# app/models/integration_feature.rb
+class IntegrationFeature < ApplicationRecord
+  # Associations
+  belongs_to :integration_provider
+
+  # Validations
+  validates :feature_key, presence: true,
+                          length: { maximum: 50 },
+                          format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" },
+                          uniqueness: { scope: :integration_provider_id }
+  validates :feature_name, presence: true, length: { maximum: 100 }
+  validates :display_order, presence: true, numericality: { only_integer: true }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :ordered, -> { order(display_order: :asc, feature_name: :asc) }
+
+  # Instance methods
+  def available?
+    is_active
+  end
+end
+# app/models/integration_provider.rb
+class IntegrationProvider < ApplicationRecord
+  # Associations
+  belongs_to :integration_category
+  has_one :integration_auth_schema, dependent: :destroy
+  has_many :integration_features, dependent: :destroy
+  has_many :tenant_integration_configurations, dependent: :restrict_with_error
+
+  # Validations
+  validates :name, presence: true, length: { maximum: 100 }
+  validates :slug, presence: true,
+                   length: { maximum: 50 },
+                   uniqueness: true,
+                   format: { with: /\A[a-z0-9_]+\z/, message: "solo permite minúsculas, números y guiones bajos" }
+  validates :status, presence: true,
+                     inclusion: { in: %w[active coming_soon deprecated beta] }
+  validates :api_base_url, length: { maximum: 500 }, allow_blank: true
+  validates :logo_url, length: { maximum: 500 }, allow_blank: true
+  validates :website_url, length: { maximum: 500 }, allow_blank: true
+  validates :display_order, presence: true, numericality: { only_integer: true }
+
+  # Scopes
+  scope :active, -> { where(is_active: true) }
+  scope :by_status, ->(status) { where(status: status) }
+  scope :premium, -> { where(is_premium: true) }
+  scope :free, -> { where(is_premium: false) }
+  scope :ordered, -> { order(display_order: :asc, name: :asc) }
+  scope :for_marketplace, -> { active.where(status: [ "active", "beta" ]).ordered }
+
+  # Callbacks
+  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
+
+  # Instance methods
+  def available?
+    is_active && status.in?([ "active", "beta" ])
+  end
+
+  def ready_for_production?
+    is_active && status == "active"
+  end
+
+  def configured_by_tenant?(tenant)
+    tenant_integration_configurations.exists?(tenant: tenant)
+  end
+
+  def active_configurations_count
+    tenant_integration_configurations.active.count
+  end
+
+  private
+
+  def generate_slug
+    self.slug = name.parameterize.underscore
+  end
+end
+# app/models/integration_raw_data.rb
+class IntegrationRawData < ApplicationRecord
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :integration_sync_execution
+  belongs_to :tenant_integration_configuration
+
+  # Asociación polimórfica al registro normalizado final
+  # normalized_record_type = 'VehicleRefueling' o 'VehicleElectricCharge'
+  # normalized_record_id = ID del registro
+  belongs_to :normalized_record,
+             polymorphic: true,
+             optional: true
+
+  # Delegaciones
+  delegate :tenant, :integration_provider, to: :tenant_integration_configuration
+
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :provider_slug, presence: true
+  validates :feature_key, presence: true
+  validates :external_id, presence: true
   validates :raw_data, presence: true
+  validates :processing_status, presence: true,
+                                inclusion: { in: %w[pending normalized failed duplicate] }
 
-  # Scopes
-  scope :unresolved, -> { where(resolved: false) }
-  scope :resolved, -> { where(resolved: true) }
+  # Validación de unicidad (también manejada por índice UNIQUE en BD)
+  validates :external_id, uniqueness: {
+    scope: [ :tenant_integration_configuration_id, :provider_slug, :feature_key ],
+    message: "ya existe para esta configuración"
+  }
+
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :pending, -> { where(processing_status: "pending") }
+  scope :normalized, -> { where(processing_status: "normalized") }
+  scope :failed, -> { where(processing_status: "failed") }
+  scope :duplicate, -> { where(processing_status: "duplicate") }
+  scope :by_feature, ->(feature) { where(feature_key: feature) }
+  scope :by_provider, ->(provider) { where(provider_slug: provider) }
+  scope :by_execution, ->(execution_id) { where(integration_sync_execution_id: execution_id) }
   scope :recent, -> { order(created_at: :desc) }
-  scope :by_type, ->(type) { where(error_type: type) }
-  scope :by_provider, ->(provider) { where(provider_name: provider) }
 
-  # Instance methods
-  def resolve!(notes = nil)
+  # ============================================================================
+  # CALLBACKS
+  # ============================================================================
+  # No callbacks para mantener simplicidad y evitar efectos secundarios
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Estados
+  def pending?
+    processing_status == "pending"
+  end
+
+  def normalized?
+    processing_status == "normalized"
+  end
+
+  def failed?
+    processing_status == "failed"
+  end
+
+  def duplicate?
+    processing_status == "duplicate"
+  end
+
+  # Marcar como normalizado
+  def mark_as_normalized!(record)
     update!(
-      resolved: true,
-      resolved_at: Time.current,
-      resolution_notes: notes
+      processing_status: "normalized",
+      normalized_record: record,
+      normalized_at: Time.current,
+      normalization_error: nil
     )
   end
 
-  def mark_unresolved!
+  # Marcar como fallido
+  def mark_as_failed!(error_msg)
     update!(
-      resolved: false,
-      resolved_at: nil,
-      resolution_notes: nil
+      processing_status: "failed",
+      normalization_error: error_msg,
+      normalized_at: Time.current
     )
   end
 
-  def raw_data_hash
-    raw_data.is_a?(String) ? JSON.parse(raw_data) : raw_data
-  rescue JSON::ParserError
-    {}
+  # Marcar como duplicado
+  def mark_as_duplicate!
+    update!(processing_status: "duplicate")
+  end
+
+  # Resetear para reprocesar
+  def reset_for_reprocessing!
+    update!(
+      processing_status: "pending",
+      normalized_record_type: nil,
+      normalized_record_id: nil,
+      normalization_error: nil,
+      normalized_at: nil
+    )
+  end
+
+  # Acceso a campos del raw_data
+  def raw_field(key)
+    raw_data&.dig(key.to_s)
+  end
+
+  # Verificar si tiene un campo
+  def has_raw_field?(key)
+    raw_data&.key?(key.to_s)
+  end
+
+  # Descripción legible
+  def description
+    "#{provider_slug}/#{feature_key} - #{external_id[0..10]}..."
+  end
+
+  # ============================================================================
+  # CLASS METHODS
+  # ============================================================================
+
+  # Crear o marcar como duplicado
+  def self.create_or_mark_duplicate(attributes)
+    create!(attributes)
+  rescue ActiveRecord::RecordNotUnique
+    # Si el índice UNIQUE detecta duplicado, buscamos el registro
+    existing = find_by(
+      tenant_integration_configuration_id: attributes[:tenant_integration_configuration_id],
+      provider_slug: attributes[:provider_slug],
+      feature_key: attributes[:feature_key],
+      external_id: attributes[:external_id]
+    )
+    existing&.mark_as_duplicate!
+    existing
+  end
+
+  # Contar por estado
+  def self.count_by_status
+    group(:processing_status).count
   end
 end
-# app/models/telemetry_provider.rb
-class TelemetryProvider < ApplicationRecord
+# app/models/integration_sync_execution.rb
+class IntegrationSyncExecution < ApplicationRecord
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :tenant_integration_configuration
+  has_many :integration_raw_data, dependent: :destroy
+
+  # Delegaciones para acceso rápido
+  delegate :tenant, :integration_provider, to: :tenant_integration_configuration
+  delegate :name, to: :integration_provider, prefix: true
+
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :feature_key, presence: true,
+                          inclusion: {
+                            in: %w[fuel battery trips real_time_location odometer diagnostics],
+                            message: "%{value} no es una feature válida"
+                          }
+
+  validates :trigger_type, presence: true,
+                           inclusion: { in: %w[manual scheduled test] }
+
+  validates :status, presence: true,
+                     inclusion: { in: %w[running completed failed] }
+
+  validates :started_at, presence: true
+
+  # Validaciones condicionales
+  validates :finished_at, presence: true, if: -> { completed? || failed? }
+  validates :duration_seconds, presence: true, if: -> { finished_at.present? }
+
+  # Validaciones de integridad de estadísticas
+  validate :validate_statistics_integrity, if: -> { completed? }
+
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :running, -> { where(status: "running") }
+  scope :completed, -> { where(status: "completed") }
+  scope :failed, -> { where(status: "failed") }
+  scope :manual, -> { where(trigger_type: "manual") }
+  scope :scheduled, -> { where(trigger_type: "scheduled") }
+  scope :recent, -> { order(started_at: :desc) }
+  scope :by_feature, ->(feature) { where(feature_key: feature) }
+  scope :by_config, ->(config_id) { where(tenant_integration_configuration_id: config_id) }
+  scope :today, -> { where("started_at >= ?", Time.current.beginning_of_day) }
+  scope :this_week, -> { where("started_at >= ?", Time.current.beginning_of_week) }
+
+  # ============================================================================
+  # CALLBACKS
+  # ============================================================================
+  before_create :set_started_at
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Estado
+  def running?
+    status == "running"
+  end
+
+  def completed?
+    status == "completed"
+  end
+
+  def failed?
+    status == "failed"
+  end
+
+  def finished?
+    completed? || failed?
+  end
+
+  # Marcar como completada
+  def mark_as_completed!
+    update!(
+      status: "completed",
+      finished_at: Time.current,
+      duration_seconds: calculate_duration
+    )
+  end
+
+  # Marcar como fallida
+  def mark_as_failed!(error_msg)
+    update!(
+      status: "failed",
+      finished_at: Time.current,
+      duration_seconds: calculate_duration,
+      error_message: error_msg
+    )
+  end
+
+  # Actualizar estadísticas
+  def update_statistics!(stats)
+    update!(
+      records_fetched: stats[:fetched] || 0,
+      records_processed: stats[:processed] || 0,
+      records_failed: stats[:failed] || 0,
+      records_skipped: stats[:skipped] || 0
+    )
+  end
+
+  # Calcular tasa de éxito
+  def success_rate
+    return 0 if records_fetched.zero?
+    ((records_processed.to_f / records_fetched) * 100).round(2)
+  end
+
+  # Verificar si hubo errores
+  def has_errors?
+    records_failed > 0
+  end
+
+  # Verificar si hubo duplicados
+  def has_duplicates?
+    records_skipped > 0
+  end
+
+  # Resumen de la ejecución
+  def summary
+    {
+      id: id,
+      feature: feature_key,
+      status: status,
+      duration: duration_seconds,
+      success_rate: "#{success_rate}%",
+      stats: {
+        fetched: records_fetched,
+        processed: records_processed,
+        failed: records_failed,
+        skipped: records_skipped
+      }
+    }
+  end
+
+  # Descripción legible
+  def description
+    provider = integration_provider_name
+    feature = I18n.t("features.#{feature_key}", default: feature_key.humanize)
+    trigger = I18n.t("triggers.#{trigger_type}", default: trigger_type.humanize)
+
+    "#{provider} - #{feature} (#{trigger})"
+  end
+
+  # Obtener raw_data con errores
+  def failed_raw_data
+    integration_raw_data.where(processing_status: "failed")
+  end
+
+  # Obtener raw_data pendientes
+  def pending_raw_data
+    integration_raw_data.where(processing_status: "pending")
+  end
+
+  private
+
+  def set_started_at
+    self.started_at ||= Time.current
+  end
+
+  def calculate_duration
+    return nil unless started_at && finished_at
+    (finished_at - started_at).to_i
+  end
+
+  def validate_statistics_integrity
+    total = records_processed + records_failed + records_skipped
+
+    if total != records_fetched
+      errors.add(:base, "Las estadísticas no cuadran: procesados(#{records_processed}) + fallidos(#{records_failed}) + omitidos(#{records_skipped}) ≠ obtenidos(#{records_fetched})")
+    end
+  end
+end
+# app/models/tenant_integration_configuration.rb
+class TenantIntegrationConfiguration < ApplicationRecord
+  # Encriptación de credenciales
+  encrypts :credentials
+
   # Associations
-  has_many :telemetry_credentials, dependent: :restrict_with_error
+  belongs_to :tenant
+  belongs_to :integration_provider
+
+  has_many :vehicle_provider_mappings, dependent: :destroy
+  has_many :vehicles, through: :vehicle_provider_mappings
+
+  # Delegaciones
+  delegate :name, :slug, :logo_url, :api_base_url, to: :integration_provider, prefix: true
+  delegate :integration_features, :integration_auth_schema, to: :integration_provider
 
   # Validations
-  validates :name, presence: true
-  validates :slug, presence: true, uniqueness: true, format: { with: /\A[a-z0-9_]+\z/ }
-  validates :api_base_url, presence: true, format: { with: URI::DEFAULT_PARSER.make_regexp(%w[http https]) }
+  validates :tenant_id, uniqueness: {
+    scope: :integration_provider_id,
+    message: "ya tiene una configuración para este proveedor"
+  }
+
+  validates :sync_frequency, presence: true,
+                             inclusion: { in: %w[daily weekly monthly] }
+
+  validates :sync_hour, presence: true,
+                        numericality: {
+                          only_integer: true,
+                          greater_than_or_equal_to: 0,
+                          less_than_or_equal_to: 23
+                        }
+
+  # Validaciones condicionales para weekly
+  validates :sync_day_of_week,
+            numericality: {
+              only_integer: true,
+              greater_than_or_equal_to: 0,
+              less_than_or_equal_to: 6
+            },
+            if: -> { sync_frequency == "weekly" }
+
+  validates :sync_day_of_week,
+            absence: { message: "debe estar vacío para frecuencia diaria o mensual" },
+            unless: -> { sync_frequency == "weekly" }
+
+  # Validaciones condicionales para monthly
+  validates :sync_day_of_month,
+            inclusion: { in: %w[start end] },
+            if: -> { sync_frequency == "monthly" }
+
+  validates :sync_day_of_month,
+            absence: { message: "debe estar vacío para frecuencia diaria o semanal" },
+            unless: -> { sync_frequency == "monthly" }
+
+  # Validación personalizada de credenciales
+  validate :validate_credentials_structure, if: -> { credentials.present? }
+
+  # Validación de features
+  validate :validate_enabled_features, if: -> { enabled_features.present? }
 
   # Scopes
   scope :active, -> { where(is_active: true) }
   scope :inactive, -> { where(is_active: false) }
+  scope :by_provider, ->(provider_slug) {
+    joins(:integration_provider).where(integration_providers: { slug: provider_slug })
+  }
+  scope :with_errors, -> { where(last_sync_status: "error") }
+  scope :successful, -> { where(last_sync_status: "success") }
+  scope :ready_for_sync, -> {
+    active.where("last_sync_at IS NULL OR last_sync_at < ?", 1.hour.ago)
+  }
 
-  # Class methods
-  def self.find_by_slug!(slug)
-    find_by!(slug: slug)
-  end
+  # Callbacks
+  before_save :set_activated_at, if: -> { is_active_changed? && is_active? }
 
   # Instance methods
   def activate!
@@ -283,178 +670,788 @@ class TelemetryProvider < ApplicationRecord
     update!(is_active: false)
   end
 
-  def geotab?
-    slug == "geotab"
+  def active?
+    is_active
+  end
+
+  def has_error?
+    last_sync_status == "error"
+  end
+
+  def last_sync_successful?
+    last_sync_status == "success"
+  end
+
+  def feature_enabled?(feature_key)
+    enabled_features.include?(feature_key.to_s)
+  end
+
+  def available_features
+    integration_provider.integration_features.active.where(feature_key: enabled_features)
+  end
+
+  def calculate_next_sync_at
+    base_time = Time.current.change(hour: sync_hour, min: 0, sec: 0)
+
+    case sync_frequency
+    when "daily"
+      base_time > Time.current ? base_time : base_time + 1.day
+
+    when "weekly"
+      days_until_target = (sync_day_of_week - base_time.wday) % 7
+      days_until_target = 7 if days_until_target.zero? && base_time < Time.current
+      base_time + days_until_target.days
+
+    when "monthly"
+      if sync_day_of_month == "start"
+        target = base_time.beginning_of_month.change(hour: sync_hour)
+        target > Time.current ? target : (target + 1.month).beginning_of_month.change(hour: sync_hour)
+      else # 'end'
+        target = base_time.end_of_month.beginning_of_day.change(hour: sync_hour)
+        target > Time.current ? target : (base_time + 1.month).end_of_month.beginning_of_day.change(hour: sync_hour)
+      end
+    end
+  end
+
+  def sync_schedule_description
+    case sync_frequency
+    when "daily"
+      "Todos los días a las #{format_hour(sync_hour)}"
+    when "weekly"
+      day_name = I18n.t("date.day_names")[sync_day_of_week]
+      "Todos los #{day_name} a las #{format_hour(sync_hour)}"
+    when "monthly"
+      day_desc = sync_day_of_month == "start" ? "el primer día del mes" : "el último día del mes"
+      "#{day_desc.capitalize} a las #{format_hour(sync_hour)}"
+    end
+  end
+
+  def mark_sync_success!(timestamp = Time.current)
+    update!(
+      last_sync_at: timestamp,
+      last_sync_status: "success",
+      last_sync_error: nil
+    )
+  end
+
+  def mark_sync_error!(error_message)
+    update!(
+      last_sync_at: Time.current,
+      last_sync_status: "error",
+      last_sync_error: error_message
+    )
+  end
+
+  # Método auxiliar para obtener vehículos mapeados activos
+  def mapped_vehicles
+    vehicles.joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct
+  end
+
+  # Método para verificar si un vehículo está mapeado
+  def vehicle_mapped?(vehicle)
+    vehicle_provider_mappings.active.exists?(vehicle: vehicle)
+  end
+
+  # Obtener mapeo de un vehículo
+  def mapping_for(vehicle)
+    vehicle_provider_mappings.active.find_by(vehicle: vehicle)
+  end
+
+  private
+
+  def set_activated_at
+    self.activated_at = Time.current
+  end
+
+  def format_hour(hour)
+    Time.current.change(hour: hour).strftime("%H:%M")
+  end
+
+  def validate_credentials_structure
+    return unless integration_provider.integration_auth_schema
+
+    schema = integration_provider.integration_auth_schema
+    required_fields = schema.required_fields.map { |f| f["name"] }
+
+    unless credentials.is_a?(Hash)
+      errors.add(:credentials, "debe ser un objeto JSON válido")
+      return
+    end
+
+    missing_fields = required_fields - credentials.keys.map(&:to_s)
+
+    if missing_fields.any?
+      errors.add(:credentials, "faltan campos requeridos: #{missing_fields.join(', ')}")
+    end
+  end
+
+  def validate_enabled_features
+    unless enabled_features.is_a?(Array)
+      errors.add(:enabled_features, "debe ser un array")
+      return
+    end
+
+    available_feature_keys = integration_provider.integration_features.active.pluck(:feature_key)
+    invalid_features = enabled_features - available_feature_keys
+
+    if invalid_features.any?
+      errors.add(:enabled_features, "contiene features no disponibles: #{invalid_features.join(', ')}")
+    end
   end
 end
-# app/models/telemetry_sync_log.rb
-class TelemetrySyncLog < ApplicationRecord
+# app/models/tenant.rb
+class Tenant < ApplicationRecord
   # Associations
-  belongs_to :telemetry_credential
-  belongs_to :vehicle, optional: true
-  has_many :telemetry_normalization_errors, dependent: :destroy
-
+  has_many :tenant_integration_configurations, dependent: :destroy
+  has_many :integration_providers, through: :tenant_integration_configurations
+  has_many :vehicles, dependent: :destroy
   # Validations
-  validates :sync_type, presence: true, inclusion: { in: %w[refuels charges odometer trips full] }
-  validates :status, presence: true, inclusion: { in: %w[success error partial pending] }
+  validates :name, presence: true, length: { maximum: 255 }
+  validates :slug, presence: true,
+                   length: { maximum: 100 },
+                   uniqueness: true,
+                   format: { with: /\A[a-z0-9\-_]+\z/, message: "solo permite minúsculas, números, guiones y guiones bajos" }
+  validates :status, presence: true,
+                     inclusion: { in: %w[active suspended trial] }
+  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_blank: true
 
   # Scopes
-  scope :recent, -> { order(created_at: :desc) }
-  scope :successful, -> { where(status: "success") }
-  scope :failed, -> { where(status: "error") }
-  scope :partial, -> { where(status: "partial") }
-  scope :for_provider, ->(provider_slug) {
-    joins(telemetry_credential: :telemetry_provider)
-      .where(telemetry_providers: { slug: provider_slug })
-  }
-  scope :for_sync_type, ->(type) { where(sync_type: type) }
-  scope :today, -> { where("DATE(created_at) = ?", Date.current) }
+  scope :active, -> { where(status: "active") }
+  scope :suspended, -> { where(status: "suspended") }
+  scope :trial, -> { where(status: "trial") }
+
+  # Callbacks
+  before_validation :generate_slug, if: -> { slug.blank? && name.present? }
 
   # Instance methods
-  def success?
-    status == "success"
+  def active?
+    status == "active"
   end
 
-  def error?
-    status == "error"
+  def suspended?
+    status == "suspended"
   end
 
-  def partial?
-    status == "partial"
+  def trial?
+    status == "trial"
   end
 
-  def duration_seconds
-    return nil if started_at.nil? || completed_at.nil?
-    completed_at - started_at
+  def active_integrations
+    tenant_integration_configurations.active
   end
 
-  def has_errors?
-    telemetry_normalization_errors.any?
+  def has_integration?(provider_slug)
+    integration_providers.exists?(slug: provider_slug)
   end
 
-  def error_count
-    telemetry_normalization_errors.count
+  def integration_for(provider_slug)
+    tenant_integration_configurations
+      .joins(:integration_provider)
+      .find_by(integration_providers: { slug: provider_slug })
   end
 
-  def success_rate_percent
-    return 0 if records_processed.zero?
-    ((records_created.to_f / records_processed) * 100).round(2)
+  # Método auxiliar para obtener vehículos activos
+  def active_vehicles
+    vehicles.active
+  end
+
+  # Método para obtener vehículos con telemetría
+  def vehicles_with_telemetry
+    vehicles.joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct
+  end
+
+  private
+
+  def generate_slug
+    self.slug = name.parameterize
   end
 end
-# app/models/vehicle_telemetry_config.rb
-class VehicleTelemetryConfig < ApplicationRecord
-  # Associations
+# app/models/vehicle_electric_charge.rb
+class VehicleElectricCharge < ApplicationRecord
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :tenant
   belongs_to :vehicle
-  belongs_to :telemetry_credential
-  has_one :telemetry_provider, through: :telemetry_credential
-  has_one :company, through: :telemetry_credential
+  belongs_to :integration_raw_data, optional: true
 
-  # Validations
-  validates :vehicle_id, uniqueness: { message: "can only have one telemetry configuration" }
-  validates :external_device_id, presence: true
-  validates :sync_frequency, inclusion: { in: %w[manual hourly daily weekly] }
+  # Asociación inversa polimórfica
+  has_one :raw_data_source,
+          as: :normalized_record,
+          class_name: "IntegrationRawData"
 
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :for_provider, ->(provider_slug) {
-    joins(telemetry_credential: :telemetry_provider)
-      .where(telemetry_providers: { slug: provider_slug })
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :charge_start_time, presence: true
+  validates :charge_type, inclusion: { in: %w[AC DC], allow_blank: true }
+
+  validates :start_soc_percent, numericality: {
+    greater_than_or_equal_to: 0,
+    less_than_or_equal_to: 100
+  }, allow_nil: true
+
+  validates :end_soc_percent, numericality: {
+    greater_than_or_equal_to: 0,
+    less_than_or_equal_to: 100
+  }, allow_nil: true
+
+  validates :energy_consumed_kwh, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :peak_power_kw, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :duration_minutes, numericality: { greater_than: 0 }, allow_nil: true
+
+  validates :location_lat, numericality: {
+    greater_than_or_equal_to: -90,
+    less_than_or_equal_to: 90
+  }, allow_nil: true
+
+  validates :location_lng, numericality: {
+    greater_than_or_equal_to: -180,
+    less_than_or_equal_to: 180
+  }, allow_nil: true
+
+  # Unicidad: Un raw_data solo puede generar una carga
+  validates :integration_raw_data_id, uniqueness: true, allow_nil: true
+
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :by_tenant, ->(tenant_id) { where(tenant_id: tenant_id) }
+  scope :by_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
+  scope :between_dates, ->(from, to) { where(charge_start_time: from..to) }
+  scope :recent, -> { order(charge_start_time: :desc) }
+  scope :ac_charges, -> { where(charge_type: "AC") }
+  scope :dc_charges, -> { where(charge_type: "DC") }
+  scope :estimated, -> { where(is_estimated: true) }
+  scope :measured, -> { where(is_estimated: false) }
+  scope :complete_charges, -> { where("end_soc_percent >= ?", 95) }
+  scope :this_month, -> { where("charge_start_time >= ?", Time.current.beginning_of_month) }
+  scope :this_year, -> { where("charge_start_time >= ?", Time.current.beginning_of_year) }
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Cálculos
+  def soc_gained
+    return nil unless start_soc_percent && end_soc_percent
+    (end_soc_percent - start_soc_percent).round(2)
+  end
+
+  def duration_hours
+    return nil unless duration_minutes
+    (duration_minutes / 60.0).round(2)
+  end
+
+  def average_power_kw
+    return nil unless energy_consumed_kwh && duration_hours && duration_hours > 0
+    (energy_consumed_kwh / duration_hours).round(2)
+  end
+
+  def has_location?
+    location_lat.present? && location_lng.present?
+  end
+
+  def from_integration?
+    integration_raw_data_id.present?
+  end
+
+  def manual?
+    !from_integration?
+  end
+
+  def is_fast_charge?
+    charge_type == "DC"
+  end
+
+  def is_slow_charge?
+    charge_type == "AC"
+  end
+
+  def is_complete_charge?
+    end_soc_percent && end_soc_percent >= 95
+  end
+
+  # Coordenadas como array [lat, lng]
+  def coordinates
+    return nil unless has_location?
+    [ location_lat, location_lng ]
+  end
+
+  # Descripción legible
+  def description
+    "#{energy_consumed_kwh}kWh (#{charge_type}) el #{charge_start_time.strftime('%d/%m/%Y')}"
+  end
+
+  # ============================================================================
+  # CLASS METHODS
+  # ============================================================================
+
+  # Estadísticas
+  def self.total_energy
+    sum(:energy_consumed_kwh).to_f.round(2)
+  end
+
+  def self.average_energy
+    average(:energy_consumed_kwh).to_f.round(2)
+  end
+
+  def self.total_duration_hours
+    (sum(:duration_minutes).to_f / 60).round(2)
+  end
+
+  def self.count_by_charge_type
+    group(:charge_type).count
+  end
+
+  def self.monthly_summary(year = Time.current.year)
+    where("EXTRACT(YEAR FROM charge_start_time) = ?", year)
+      .group("EXTRACT(MONTH FROM charge_start_time)")
+      .select(
+        "EXTRACT(MONTH FROM charge_start_time) as month",
+        "COUNT(*) as count",
+        "SUM(energy_consumed_kwh) as total_kwh",
+        "AVG(duration_minutes) as avg_duration_minutes"
+      )
+  end
+end
+
+# ==============================================================================
+# ACTUALIZAR MODELO EXISTENTE: TenantIntegrationConfiguration
+# ==============================================================================
+# Agregar relaciones con las nuevas tablas
+
+# app/models/tenant_integration_configuration.rb
+# AGREGAR ESTAS LÍNEAS al modelo existente:
+
+class TenantIntegrationConfiguration < ApplicationRecord
+  # ... código existente ...
+
+  # AGREGAR estas relaciones:
+  has_many :integration_sync_executions, dependent: :destroy
+  has_many :integration_raw_data, dependent: :destroy
+
+  # Método auxiliar para obtener última ejecución
+  def last_sync_execution
+    integration_sync_executions.recent.first
+  end
+
+  # Método auxiliar para obtener ejecuciones por feature
+  def sync_executions_for(feature_key)
+    integration_sync_executions.by_feature(feature_key).recent
+  end
+
+  # Estadísticas de sincronización
+  def sync_statistics
+    {
+      total_executions: integration_sync_executions.count,
+      completed: integration_sync_executions.completed.count,
+      failed: integration_sync_executions.failed.count,
+      total_raw_records: integration_raw_data.count,
+      pending_records: integration_raw_data.pending.count,
+      failed_records: integration_raw_data.failed.count
+    }
+  end
+end
+# app/models/vehicle_provider_mapping.rb
+class VehicleProviderMapping < ApplicationRecord
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :vehicle
+  belongs_to :tenant_integration_configuration
+
+  # Delegaciones
+  delegate :tenant, :integration_provider, to: :tenant_integration_configuration
+  delegate :name, to: :vehicle, prefix: true
+  delegate :license_plate, to: :vehicle, prefix: true
+
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :external_vehicle_id, presence: true, length: { maximum: 100 }
+
+  # Un vehículo solo puede tener un mapeo activo por configuración
+  validates :vehicle_id, uniqueness: {
+    scope: [ :tenant_integration_configuration_id, :is_active ],
+    conditions: -> { where(is_active: true) },
+    message: "ya tiene un mapeo activo para esta configuración"
+  }, if: :is_active?
+
+  # Un external_vehicle_id solo puede estar mapeado una vez por configuración
+  validates :external_vehicle_id, uniqueness: {
+    scope: :tenant_integration_configuration_id,
+    message: "ya está mapeado a otro vehículo en esta configuración"
   }
-  scope :sync_refuels, -> { where("data_types @> ?", [ "refuels" ].to_json) }
-  scope :sync_charges, -> { where("data_types @> ?", [ "charges" ].to_json) }
 
-  # Instance methods
-  def should_sync?(data_type)
-    data_types.include?(data_type.to_s)
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :active, -> { where(is_active: true) }
+  scope :inactive, -> { where(is_active: false) }
+  scope :by_config, ->(config_id) { where(tenant_integration_configuration_id: config_id) }
+  scope :by_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
+  scope :by_provider, ->(provider_slug) {
+    joins(tenant_integration_configuration: :integration_provider)
+      .where(integration_providers: { slug: provider_slug })
+  }
+  scope :by_external_id, ->(external_id) { where(external_vehicle_id: external_id) }
+  scope :recent_sync, -> { order(last_sync_at: :desc) }
+
+  # ============================================================================
+  # CALLBACKS
+  # ============================================================================
+  before_create :set_mapped_at
+  after_save :update_vehicle_telemetry_flag, if: :saved_change_to_is_active?
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  def activate!
+    # Desactivar otros mapeos del mismo vehículo para esta configuración
+    self.class.where(
+      vehicle_id: vehicle_id,
+      tenant_integration_configuration_id: tenant_integration_configuration_id
+    ).where.not(id: id).update_all(is_active: false)
+
+    update!(is_active: true, mapped_at: Time.current)
+  end
+
+  def deactivate!
+    update!(is_active: false)
   end
 
   def provider_name
-    telemetry_credential.provider_name
+    integration_provider.name
   end
 
-  def credentials_hash
-    telemetry_credential.credentials_hash
+  def provider_slug
+    integration_provider.slug
   end
 
-  def sync_refuels?
-    should_sync?("refuels")
+  def update_last_sync!
+    update!(last_sync_at: Time.current)
   end
 
-  def sync_charges?
-    should_sync?("charges")
+  def description
+    "#{vehicle_name} (#{vehicle_license_plate}) ↔ #{provider_name} [#{external_vehicle_id}]"
   end
 
-  def sync_odometer?
-    should_sync?("odometer")
+  private
+
+  def set_mapped_at
+    self.mapped_at ||= Time.current
+  end
+
+  def update_vehicle_telemetry_flag
+    # Actualizar el flag has_telemetry del vehículo
+    # (Este flag se puede agregar al modelo Vehicle si se necesita)
+  end
+end
+# app/models/vehicle_refueling.rb
+class VehicleRefueling < ApplicationRecord
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :tenant
+  belongs_to :vehicle
+  belongs_to :integration_raw_data, optional: true
+
+  # Asociación inversa polimórfica
+  has_one :raw_data_source,
+          as: :normalized_record,
+          class_name: "IntegrationRawData"
+
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :refueling_date, presence: true
+  validates :volume_liters, presence: true,
+                            numericality: { greater_than: 0 }
+
+  validates :cost, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :currency, length: { is: 3 }, allow_blank: true
+
+  validates :location_lat, numericality: {
+    greater_than_or_equal_to: -90,
+    less_than_or_equal_to: 90
+  }, allow_nil: true
+
+  validates :location_lng, numericality: {
+    greater_than_or_equal_to: -180,
+    less_than_or_equal_to: 180
+  }, allow_nil: true
+
+  validates :odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+
+  # Unicidad: Un raw_data solo puede generar un refueling
+  validates :integration_raw_data_id, uniqueness: true, allow_nil: true
+
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :by_tenant, ->(tenant_id) { where(tenant_id: tenant_id) }
+  scope :by_vehicle, ->(vehicle_id) { where(vehicle_id: vehicle_id) }
+  scope :between_dates, ->(from, to) { where(refueling_date: from..to) }
+  scope :recent, -> { order(refueling_date: :desc) }
+  scope :estimated, -> { where(is_estimated: true) }
+  scope :measured, -> { where(is_estimated: false) }
+  scope :with_cost, -> { where.not(cost: nil) }
+  scope :by_fuel_type, ->(type) { where(fuel_type: type) }
+  scope :this_month, -> { where("refueling_date >= ?", Time.current.beginning_of_month) }
+  scope :this_year, -> { where("refueling_date >= ?", Time.current.beginning_of_year) }
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Cálculos
+  def cost_per_liter
+    return nil unless cost && volume_liters && volume_liters > 0
+    (cost / volume_liters).round(2)
+  end
+
+  def has_location?
+    location_lat.present? && location_lng.present?
+  end
+
+  def has_cost?
+    cost.present? && cost > 0
+  end
+
+  def from_integration?
+    integration_raw_data_id.present?
+  end
+
+  def manual?
+    !from_integration?
+  end
+
+  # Coordenadas como array [lat, lng]
+  def coordinates
+    return nil unless has_location?
+    [ location_lat, location_lng ]
+  end
+
+  # Descripción legible
+  def description
+    "#{volume_liters}L el #{refueling_date.strftime('%d/%m/%Y')}"
+  end
+
+  # ============================================================================
+  # CLASS METHODS
+  # ============================================================================
+
+  # Estadísticas
+  def self.total_volume
+    sum(:volume_liters).round(2)
+  end
+
+  def self.total_cost
+    sum(:cost).round(2)
+  end
+
+  def self.average_volume
+    average(:volume_liters).to_f.round(2)
+  end
+
+  def self.count_by_fuel_type
+    group(:fuel_type).count
+  end
+
+  def self.monthly_summary(year = Time.current.year)
+    where("EXTRACT(YEAR FROM refueling_date) = ?", year)
+      .group("EXTRACT(MONTH FROM refueling_date)")
+      .select(
+        "EXTRACT(MONTH FROM refueling_date) as month",
+        "COUNT(*) as count",
+        "SUM(volume_liters) as total_liters",
+        "SUM(cost) as total_cost"
+      )
   end
 end
 # app/models/vehicle.rb
 class Vehicle < ApplicationRecord
-  # Associations
-  belongs_to :company
-  has_one :vehicle_telemetry_config, dependent: :destroy
-  has_many :refuels, dependent: :destroy
-  has_many :electric_charges, dependent: :destroy
-  has_many :telemetry_sync_logs, dependent: :nullify
+  # ============================================================================
+  # ASSOCIATIONS
+  # ============================================================================
+  belongs_to :tenant
 
-  # Validations
-  validates :name, presence: true
-  validates :license_plate, presence: true, uniqueness: { scope: :company_id }
-  validates :fuel_type, inclusion: { in: %w[combustion electric hybrid], allow_nil: true }
+  # Mapeos con proveedores
+  has_many :vehicle_provider_mappings, dependent: :destroy
+  has_many :tenant_integration_configurations, through: :vehicle_provider_mappings
+
+  # Datos de telemetría
+  has_many :vehicle_refuelings, dependent: :destroy
+  has_many :vehicle_electric_charges, dependent: :destroy
+
+  # ============================================================================
+  # VALIDATIONS
+  # ============================================================================
+  validates :name, presence: true, length: { maximum: 255 }
+  validates :license_plate, presence: true,
+                            length: { maximum: 20 },
+                            uniqueness: { scope: :tenant_id, case_sensitive: false }
+
+  validates :vin, length: { is: 17 }, allow_blank: true,
+                  uniqueness: true,
+                  format: { with: /\A[A-HJ-NPR-Z0-9]{17}\z/, message: "formato VIN inválido" }
+
+  validates :status, presence: true,
+                     inclusion: { in: %w[active maintenance inactive sold] }
+
+  validates :fuel_type, inclusion: {
+    in: %w[diesel gasoline electric hybrid lpg cng hydrogen],
+    message: "%{value} no es un tipo de combustible válido"
+  }, allow_blank: true
+
+  validates :vehicle_type, inclusion: {
+    in: %w[car van truck motorcycle bus],
+    message: "%{value} no es un tipo de vehículo válido"
+  }, allow_blank: true
+
+  validates :year, numericality: {
+    only_integer: true,
+    greater_than_or_equal_to: 1900,
+    less_than_or_equal_to: -> { Date.current.year + 1 }
+  }, allow_nil: true
+
   validates :tank_capacity_liters, numericality: { greater_than: 0 }, allow_nil: true
   validates :battery_capacity_kwh, numericality: { greater_than: 0 }, allow_nil: true
+  validates :initial_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
+  validates :current_odometer_km, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
 
-  # Scopes
-  scope :active, -> { where(is_active: true) }
-  scope :inactive, -> { where(is_active: false) }
-  scope :with_telemetry, -> { joins(:vehicle_telemetry_config).where(vehicle_telemetry_configs: { is_active: true }) }
-  scope :without_telemetry, -> { where.missing(:vehicle_telemetry_config) }
-  scope :combustion, -> { where(fuel_type: "combustion") }
-  scope :electric, -> { where(fuel_type: "electric") }
-  scope :hybrid, -> { where(fuel_type: "hybrid") }
+  # ============================================================================
+  # SCOPES
+  # ============================================================================
+  scope :active, -> { where(status: "active") }
+  scope :inactive, -> { where(status: "inactive") }
+  scope :in_maintenance, -> { where(status: "maintenance") }
+  scope :electric, -> { where(is_electric: true) }
+  scope :combustion, -> { where(is_electric: false) }
+  scope :by_fuel_type, ->(type) { where(fuel_type: type) }
+  scope :by_vehicle_type, ->(type) { where(vehicle_type: type) }
+  scope :by_brand, ->(brand) { where(brand: brand) }
+  scope :recent, -> { order(created_at: :desc) }
+  scope :by_name, -> { order(:name) }
 
-  # Instance methods
-  def has_telemetry?
-    vehicle_telemetry_config.present? && vehicle_telemetry_config.is_active?
+  # ============================================================================
+  # CALLBACKS
+  # ============================================================================
+  before_validation :normalize_license_plate
+  before_validation :set_is_electric_flag
+  before_save :normalize_vin
+
+  # ============================================================================
+  # INSTANCE METHODS
+  # ============================================================================
+
+  # Estado
+  def active?
+    status == "active"
   end
 
-  def requires_manual_entry?
-    !has_telemetry?
+  def in_maintenance?
+    status == "maintenance"
   end
 
-  def telemetry_provider_name
-    vehicle_telemetry_config&.provider_name
+  def inactive?
+    status == "inactive"
   end
 
-  def is_electric?
-    fuel_type == "electric"
+  def sold?
+    status == "sold"
   end
 
-  def is_combustion?
-    fuel_type == "combustion"
+  # Tipo de energía
+  def electric?
+    is_electric
   end
 
-  def is_hybrid?
+  def combustion?
+    !is_electric
+  end
+
+  def hybrid?
     fuel_type == "hybrid"
   end
 
-  def last_refuel
-    refuels.recent.first
+  # Telemetría
+  def has_telemetry?
+    vehicle_provider_mappings.active.any?
   end
 
-  def last_charge
-    electric_charges.recent.first
+  def active_telemetry_provider
+    vehicle_provider_mappings.active.first&.integration_provider
   end
 
-  def total_refuels_count
-    refuels.count
+  # Mantenimiento
+  def needs_maintenance?
+    return false unless next_maintenance_date
+    next_maintenance_date <= Date.current
   end
 
-  def total_charges_count
-    electric_charges.count
+  def days_until_maintenance
+    return nil unless next_maintenance_date
+    (next_maintenance_date - Date.current).to_i
+  end
+
+  # Kilometraje
+  def total_km_driven
+    return 0 unless initial_odometer_km && current_odometer_km
+    current_odometer_km - initial_odometer_km
+  end
+
+  def update_odometer!(new_odometer)
+    update!(current_odometer_km: new_odometer) if new_odometer > (current_odometer_km || 0)
+  end
+
+  # Descripción
+  def full_name
+    parts = [ brand, model, license_plate ].compact
+    parts.join(" - ")
   end
 
   def display_name
     "#{name} (#{license_plate})"
+  end
+
+  # ============================================================================
+  # CLASS METHODS
+  # ============================================================================
+
+  def self.fuel_types
+    %w[diesel gasoline electric hybrid lpg cng hydrogen]
+  end
+
+  def self.vehicle_types
+    %w[car van truck motorcycle bus]
+  end
+
+  def self.statuses
+    %w[active maintenance inactive sold]
+  end
+
+  private
+
+  # ============================================================================
+  # CALLBACKS PRIVADOS
+  # ============================================================================
+
+  def normalize_license_plate
+    self.license_plate = license_plate&.upcase&.strip
+  end
+
+  def set_is_electric_flag
+    self.is_electric = (fuel_type == "electric")
+  end
+
+  def normalize_vin
+    self.vin = vin&.upcase&.strip if vin.present?
   end
 end

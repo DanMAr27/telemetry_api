@@ -14,288 +14,593 @@ class CreateVersions < ActiveRecord::Migration[8.0]
     add_index :versions, %i[item_type item_id]
   end
 end
-class CreateTelemetryProviders < ActiveRecord::Migration[7.0]
+# db/migrate/YYYYMMDDHHMMSS_create_integration_categories.rb
+class CreateIntegrationCategories < ActiveRecord::Migration[7.0]
   def change
-    create_table :telemetry_providers do |t|
-      t.string :name, null: false
-      t.string :slug, null: false
-      t.string :api_base_url
-      t.boolean :is_active, default: true
-      t.jsonb :configuration_schema, default: {}
+    create_table :integration_categories do |t|
+      t.string :name, null: false, limit: 100
+      t.string :slug, null: false, limit: 50
       t.text :description
+      t.string :icon, limit: 50
+      t.integer :display_order, default: 999, null: false
+      t.boolean :is_active, default: true, null: false
 
       t.timestamps
     end
 
-    add_index :telemetry_providers, :slug, unique: true
-    add_index :telemetry_providers, :is_active
+    add_index :integration_categories, :slug, unique: true
+    add_index :integration_categories, :is_active
+    add_index :integration_categories, :display_order
   end
 end
-class CreateCompanies < ActiveRecord::Migration[7.0]
+# db/migrate/YYYYMMDDHHMMSS_create_integration_providers.rb
+class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
   def change
-    # Si ya tienes tabla companies, skip esta migración
-    return if table_exists?(:companies)
+    create_table :integration_providers do |t|
+      t.references :integration_category, null: false, foreign_key: true, index: true
 
-    create_table :companies do |t|
-      t.string :name, null: false
-      t.string :tax_id
-      t.string :email
-      t.string :phone
-      t.text :address
-      t.string :city
-      t.string :state
-      t.string :postal_code
-      t.string :country
-      t.boolean :is_active, default: true
+      t.string :name, null: false, limit: 100
+      t.string :slug, null: false, limit: 50
+      t.string :api_base_url, limit: 500
+      t.text :description
+      t.string :logo_url, limit: 500
+      t.string :website_url, limit: 500
+      t.string :status, limit: 20, default: 'active', null: false
+      t.boolean :is_premium, default: false, null: false
+      t.integer :display_order, default: 999, null: false
+      t.boolean :is_active, default: true, null: false
 
       t.timestamps
     end
 
-    add_index :companies, :tax_id, unique: true
-    add_index :companies, :is_active
+    add_index :integration_providers, :slug, unique: true
+    add_index :integration_providers, :status
+    add_index :integration_providers, :is_active
+    add_index :integration_providers, :is_premium
+    add_index :integration_providers, :display_order
   end
 end
-class CreateTelemetryCredentials < ActiveRecord::Migration[7.0]
+# db/migrate/YYYYMMDDHHMMSS_create_integration_auth_schemas.rb
+class CreateIntegrationAuthSchemas < ActiveRecord::Migration[7.0]
   def change
-    create_table :telemetry_credentials do |t|
-      t.references :company, null: false, foreign_key: true
-      t.references :telemetry_provider, null: false, foreign_key: true
+    create_table :integration_auth_schemas do |t|
+      t.references :integration_provider, null: false, foreign_key: true
+
+      t.jsonb :auth_fields, null: false, default: {}
+      t.jsonb :example_credentials, default: {}
+      t.boolean :is_active, default: true, null: false
+
+      t.timestamps
+    end
+
+    # Relación 1:1 - Un proveedor tiene UN schema activo
+    add_index :integration_auth_schemas, :integration_provider_id,
+              unique: true,
+              where: "is_active = true",
+              name: 'idx_auth_schemas_active_provider'
+
+    add_index :integration_auth_schemas, :is_active
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_integration_features.rb
+class CreateIntegrationFeatures < ActiveRecord::Migration[7.0]
+  def change
+    create_table :integration_features do |t|
+      t.references :integration_provider, null: false, foreign_key: true, index: true
+
+      t.string :feature_key, null: false, limit: 50
+      t.string :feature_name, null: false, limit: 100
+      t.text :feature_description
+      t.integer :display_order, default: 999, null: false
+      t.boolean :is_active, default: true, null: false
+
+      t.timestamps
+    end
+
+    add_index :integration_features, [ :integration_provider_id, :feature_key ],
+              unique: true,
+              name: 'idx_features_provider_key'
+
+    add_index :integration_features, :feature_key
+    add_index :integration_features, :is_active
+    add_index :integration_features, :display_order
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_tenants.rb
+class CreateTenants < ActiveRecord::Migration[7.0]
+  def change
+    create_table :tenants do |t|
+      t.string :name, null: false, limit: 255
+      t.string :slug, null: false, limit: 100
+      t.string :email, limit: 255
+      t.string :status, null: false, limit: 20, default: 'active'
+      t.jsonb :settings, null: false, default: {}
+
+      t.timestamps
+    end
+
+    add_index :tenants, :slug, unique: true
+    add_index :tenants, :status
+    add_index :tenants, :created_at
+  end
+end
+class CreateTenantIntegrationConfigurations < ActiveRecord::Migration[7.0]
+  def change
+    create_table :tenant_integration_configurations do |t|
+      t.references :tenant, null: false, foreign_key: true, index: false
+      t.references :integration_provider, null: false, foreign_key: true, index: false
 
       t.text :encrypted_credentials
       t.string :encrypted_credentials_iv
 
-      t.boolean :is_active, default: true
+      t.boolean :is_active, default: false, null: false
+      t.datetime :activated_at
+
+      t.string :sync_frequency, null: false, limit: 20, default: 'daily'
+      t.integer :sync_hour, null: false, default: 2
+      t.integer :sync_day_of_week
+      t.string :sync_day_of_month, limit: 20
+
+      t.jsonb :enabled_features, null: false, default: []
+      t.jsonb :sync_config, null: false, default: {}
+
       t.datetime :last_sync_at
-      t.datetime :last_successful_sync_at
+      t.string :last_sync_status, limit: 20
+      t.text :last_sync_error
+
+      t.jsonb :metadata, null: false, default: {}
 
       t.timestamps
     end
 
-    add_index :telemetry_credentials, [ :company_id, :telemetry_provider_id ],
+    # Unique per tenant + provider
+    add_index :tenant_integration_configurations,
+              [ :tenant_id, :integration_provider_id ],
               unique: true,
-              name: 'idx_credentials_company_provider'
-    add_index :telemetry_credentials, :is_active
-    add_index :telemetry_credentials, :last_sync_at
+              name: 'idx_tenant_provider_unique'
+
+    # Other indexes
+    add_index :tenant_integration_configurations, :tenant_id, name: 'idx_tenant_config_tenant'
+    add_index :tenant_integration_configurations, :integration_provider_id, name: 'idx_tenant_config_provider'
+    add_index :tenant_integration_configurations, :is_active
+    add_index :tenant_integration_configurations, :sync_frequency
+    add_index :tenant_integration_configurations, :sync_hour
+    add_index :tenant_integration_configurations, :sync_day_of_week
+    add_index :tenant_integration_configurations, :last_sync_at
+    add_index :tenant_integration_configurations, :last_sync_status
   end
 end
+# db/migrate/YYYYMMDDHHMMSS_create_integration_sync_executions.rb
+class CreateIntegrationSyncExecutions < ActiveRecord::Migration[7.0]
+  def change
+    create_table :integration_sync_executions do |t|
+      # Relación con configuración del tenant
+      t.references :tenant_integration_configuration,
+                   null: false,
+                   foreign_key: true,
+                   index: { name: 'idx_sync_exec_config' }
+
+      # Qué se sincronizó
+      t.string :feature_key, null: false, limit: 50
+      # Valores: 'fuel', 'battery', 'trips', 'real_time_location', etc.
+
+      # Cómo se activó
+      t.string :trigger_type, null: false, limit: 20, default: 'manual'
+      # Valores: 'manual' (usuario), 'scheduled' (futuro), 'test' (pruebas)
+
+      # Estado de la ejecución
+      t.string :status, null: false, limit: 20, default: 'running'
+      # Valores: 'running', 'completed', 'failed'
+
+      # Timestamps de ejecución
+      t.datetime :started_at, null: false
+      t.datetime :finished_at
+      t.integer :duration_seconds
+      # duration_seconds se calcula: finished_at - started_at
+
+      # Estadísticas de procesamiento
+      t.integer :records_fetched, default: 0, null: false
+      # Total de registros obtenidos de la API del proveedor
+
+      t.integer :records_processed, default: 0, null: false
+      # Registros normalizados exitosamente e insertados en tablas finales
+
+      t.integer :records_failed, default: 0, null: false
+      # Registros que fallaron en normalización
+
+      t.integer :records_skipped, default: 0, null: false
+      # Registros duplicados que se ignoraron
+
+      # Error general (si toda la ejecución falla)
+      t.text :error_message
+      # Ejemplo: "Authentication failed", "API timeout", etc.
+
+      # Metadata adicional en JSON
+      t.jsonb :metadata, default: {}, null: false
+      # Ejemplo: { date_range: { from: "...", to: "..." }, api_version: "1.0" }
+
+      t.timestamps
+    end
+
+    # Índices para queries comunes
+    add_index :integration_sync_executions, :feature_key
+    add_index :integration_sync_executions, :status
+    add_index :integration_sync_executions, :trigger_type
+    add_index :integration_sync_executions, :started_at
+
+    # Índice compuesto para buscar ejecuciones de una config específica
+    add_index :integration_sync_executions,
+              [ :tenant_integration_configuration_id, :started_at ],
+              name: 'idx_sync_exec_config_date'
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_integration_raw_data.rb
+class CreateIntegrationRawData < ActiveRecord::Migration[7.0]
+  def change
+    create_table :integration_raw_data do |t|
+      # Relación con la ejecución que lo obtuvo
+      t.references :integration_sync_execution,
+                   null: false,
+                   foreign_key: true,
+                   index: { name: 'idx_raw_data_execution' }
+
+      # Relación directa con configuración (para queries rápidas sin JOIN)
+      t.references :tenant_integration_configuration,
+                   null: false,
+                   foreign_key: true,
+                   index: { name: 'idx_raw_data_config' }
+
+      # Identificación del dato
+      t.string :provider_slug, null: false, limit: 50
+      # Ejemplo: 'geotab', 'verizon_connect', 'tomtom_telematics'
+
+      t.string :feature_key, null: false, limit: 50
+      # Ejemplo: 'fuel', 'battery', 'trips'
+
+      t.string :external_id, null: false, limit: 255
+      # ID único del registro en el proveedor
+      # Ejemplo Geotab: "a8LfU7K7fpkOFf7XOZw-uCg"
+      # CRÍTICO: Este campo es clave para detectar duplicados
+
+      # Datos RAW sin transformar
+      t.jsonb :raw_data, null: false
+      # JSON completo del proveedor tal cual se recibió
+      # Ejemplo: { "id": "...", "device": { "id": "b1" }, "volume": 57.3, ... }
+
+      # Estado de procesamiento
+      t.string :processing_status, null: false, limit: 20, default: 'pending'
+      # Valores: 'pending', 'normalized', 'failed', 'duplicate'
+
+      # Referencia al registro final normalizado
+      t.string :normalized_record_type, limit: 50
+      # Ejemplo: 'VehicleRefueling', 'VehicleElectricCharge'
+      # Permite polimorfismo: saber a qué tabla apunta
+
+      t.bigint :normalized_record_id
+      # ID del registro en la tabla final (vehicle_refuelings, vehicle_electric_charges)
+
+      # Error de normalización
+      t.text :normalization_error
+      # Ejemplo: "Vehicle mapping not found for external_id: b99"
+
+      # Timestamp de normalización
+      t.datetime :normalized_at
+
+      t.timestamps
+    end
+
+    # Índice UNIQUE para detectar duplicados automáticamente
+    # Si intentas insertar el mismo external_id para la misma config+provider+feature
+    # la BD lanza ActiveRecord::RecordNotUnique
+    add_index :integration_raw_data,
+              [ :tenant_integration_configuration_id, :provider_slug, :feature_key, :external_id ],
+              unique: true,
+              name: 'idx_raw_data_unique'
+
+    # Índices para queries comunes
+    add_index :integration_raw_data, :processing_status
+    add_index :integration_raw_data, :external_id
+    add_index :integration_raw_data,
+              [ :normalized_record_type, :normalized_record_id ],
+              name: 'idx_raw_data_normalized'
+
+    # Índice para buscar registros pendientes de normalizar
+    add_index :integration_raw_data,
+              [ :integration_sync_execution_id, :processing_status ],
+              name: 'idx_raw_data_exec_status'
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_vehicles.rb
 class CreateVehicles < ActiveRecord::Migration[7.0]
   def change
-    # Si ya tienes tabla vehicles, skip esta migración
-    return if table_exists?(:vehicles)
-
     create_table :vehicles do |t|
-      t.references :company, null: false, foreign_key: true
+      # Relación con tenant (multitenancy)
+      t.references :tenant, null: false, foreign_key: true, index: true
 
-      # Información básica
-      t.string :name, null: false
-      t.string :license_plate, null: false
-      t.string :vin
-      t.string :brand
-      t.string :model
+      # Información básica del vehículo
+      t.string :name, null: false, limit: 255
+      # Ejemplo: "Furgoneta Ford Transit", "Camión Mercedes"
+
+      t.string :license_plate, null: false, limit: 20
+      # Ejemplo: "1234ABC", "5678DEF"
+
+      t.string :vin, limit: 17
+      # VIN (Vehicle Identification Number) - Número de bastidor
+      # Opcional pero útil para identificación única
+
+      # Marca y modelo
+      t.string :brand, limit: 100
+      # Ejemplo: "Ford", "Mercedes", "Renault", "Tesla"
+
+      t.string :model, limit: 100
+      # Ejemplo: "Transit", "Actros", "Master", "Model 3"
+
       t.integer :year
+      # Año de fabricación
 
       # Tipo de vehículo
-      t.string :fuel_type # combustion, electric, hybrid
+      t.string :vehicle_type, limit: 50
+      # Ejemplo: "van", "truck", "car", "motorcycle"
+
+      # Tipo de combustible/energía
+      t.string :fuel_type, limit: 50
+      # Ejemplo: "diesel", "gasoline", "electric", "hybrid"
+
+      t.boolean :is_electric, default: false, null: false
+      # Flag rápido para identificar vehículos eléctricos
+
+      # Capacidades
       t.decimal :tank_capacity_liters, precision: 10, scale: 2
+      # Capacidad del tanque de combustible (para vehículos de combustión)
+
       t.decimal :battery_capacity_kwh, precision: 10, scale: 2
+      # Capacidad de la batería (para vehículos eléctricos)
 
-      # Estado
-      t.boolean :is_active, default: true
+      # Kilometraje
+      t.decimal :initial_odometer_km, precision: 12, scale: 2
+      # Kilometraje inicial al dar de alta el vehículo
 
-      # Metadatos adicionales
-      t.jsonb :metadata, default: {}
+      t.decimal :current_odometer_km, precision: 12, scale: 2
+      # Kilometraje actual (se actualiza con sincronizaciones)
+
+      # Estado del vehículo
+      t.string :status, null: false, limit: 20, default: 'active'
+      # Valores: "active", "maintenance", "inactive", "sold"
+
+      t.date :acquisition_date
+      # Fecha de adquisición del vehículo
+
+      t.date :last_maintenance_date
+      # Fecha del último mantenimiento
+
+      t.date :next_maintenance_date
+      # Fecha del próximo mantenimiento programado
+
+      # Metadata adicional
+      t.jsonb :metadata, default: {}, null: false
+      # Campos adicionales flexibles:
+      # {
+      #   "color": "white",
+      #   "seats": 5,
+      #   "insurance_company": "AXA",
+      #   "insurance_policy": "POL-123456",
+      #   "leasing_company": "Renting SA"
+      # }
 
       t.timestamps
     end
 
-    add_index :vehicles, [ :company_id, :license_plate ], unique: true
-    add_index :vehicles, :is_active
+    # Índices para búsquedas comunes
+    add_index :vehicles, [ :tenant_id, :license_plate ], unique: true, name: 'idx_vehicles_tenant_plate'
+    add_index :vehicles, :vin, unique: true, where: "vin IS NOT NULL"
+    add_index :vehicles, :status
+    add_index :vehicles, :is_electric
     add_index :vehicles, :fuel_type
-    add_index :vehicles, :vin
+    add_index :vehicles, :vehicle_type
+    add_index :vehicles, [ :tenant_id, :status ], name: 'idx_vehicles_tenant_status'
   end
 end
-class CreateVehicleTelemetryConfigs < ActiveRecord::Migration[7.0]
+# db/migrate/YYYYMMDDHHMMSS_create_vehicle_electric_charges.rb
+class CreateVehicleElectricCharges < ActiveRecord::Migration[7.0]
   def change
-    create_table :vehicle_telemetry_configs do |t|
-      t.references :vehicle, null: false, foreign_key: true
-      t.references :telemetry_credential, null: false, foreign_key: true
+    create_table :vehicle_electric_charges do |t|
+      # Relaciones
+      t.references :tenant, null: false, foreign_key: true, index: true
+      t.references :vehicle, null: false, foreign_key: true, index: true
 
-      # ID del dispositivo en el sistema externo (ej: "b1B" en Geotab)
-      t.string :external_device_id, null: false
+      # Trazabilidad al dato RAW origen
+      t.references :integration_raw_data,
+                   foreign_key: true,
+                   index: { unique: true, name: 'idx_charges_raw_unique' }
+      # UNIQUE: Un raw_data solo puede generar una carga
+      # NULL permitido: Permite cargas manuales sin integración
 
-      # Configuración de sincronización
-      t.string :sync_frequency, default: 'daily' # hourly, daily, manual
-      t.jsonb :data_types, default: [ 'refuels', 'charges', 'odometer' ]
+      # Tiempos de carga
+      t.datetime :charge_start_time, null: false
+      t.datetime :charge_end_time
+      # charge_end_time se calcula: start_time + duration
 
-      t.boolean :is_active, default: true
-      t.datetime :last_sync_at
-
-      t.timestamps
-    end
-
-    # Un vehículo solo puede estar asociado a un proveedor a la vez
-    add_index :vehicle_telemetry_configs, :external_device_id
-    add_index :vehicle_telemetry_configs, :is_active
-  end
-end
-class CreateElectricCharges < ActiveRecord::Migration[7.0]
-  def change
-    create_table :electric_charges do |t|
-      t.references :vehicle, null: false, foreign_key: true
-
-      # Identificación del proveedor
-      t.string :external_id, null: false
-      t.string :provider_name, null: false
-
-      # Datos normalizados de la carga
-      t.datetime :start_time, null: false
       t.integer :duration_minutes
-      t.decimal :energy_consumed_kwh, precision: 10, scale: 3
+      # Duración en minutos
 
-      # Estado de la batería
-      t.decimal :start_soc_percent, precision: 5, scale: 2
-      t.decimal :end_soc_percent, precision: 5, scale: 2
+      # Ubicación
+      t.decimal :location_lat, precision: 10, scale: 8
+      t.decimal :location_lng, precision: 11, scale: 8
 
       # Tipo de carga
-      t.string :charge_type # AC, DC
-      t.boolean :charge_is_estimated
+      t.string :charge_type, limit: 10
+      # Valores: 'AC', 'DC'
 
-      # Ubicación
-      t.decimal :location_lat, precision: 10, scale: 6
-      t.decimal :location_lng, precision: 10, scale: 6
+      # Estado de carga (SOC - State of Charge)
+      t.decimal :start_soc_percent, precision: 5, scale: 2
+      t.decimal :end_soc_percent, precision: 5, scale: 2
+      # Ejemplo: 61.10% → 100.00%
 
-      # Datos del vehículo en el momento de la carga
-      t.decimal :odometer_km, precision: 12, scale: 2
+      # Energía consumida
+      t.decimal :energy_consumed_kwh, precision: 10, scale: 3
+      # Ejemplo: 16.600 kWh
+
+      # Potencia pico
       t.decimal :peak_power_kw, precision: 10, scale: 3
+      # Ejemplo: 6.889 kW
 
-      # Mediciones detalladas de energía (específico de algunos proveedores)
-      t.decimal :measured_charger_energy_in_kwh, precision: 10, scale: 3
-      t.decimal :measured_battery_energy_in_kwh, precision: 10, scale: 3
+      # Odómetro
+      t.decimal :odometer_km, precision: 12, scale: 2
 
-      # JSON original del proveedor
-      t.jsonb :raw_data, default: {}
+      # Indicadores
+      t.boolean :is_estimated, default: false, null: false
+      # Si el dato es estimado o medido
+
+      # Voltaje AC (solo para cargas AC)
+      t.integer :max_ac_voltage
+      # Ejemplo: 231V, 232V
+
+      # Metadata del proveedor
+      t.jsonb :provider_metadata, default: {}, null: false
+      # Ejemplo: {
+      #   "measuredOnBoardChargerEnergyInKwh": 5.39,
+      #   "measuredBatteryEnergyInKwh": 4.98,
+      #   "version": "000000000001139a"
+      # }
 
       t.timestamps
     end
 
-    # Evitar duplicados
-    add_index :electric_charges, [ :vehicle_id, :external_id, :provider_name ],
-              unique: true,
-              name: 'idx_charges_vehicle_external'
-
-    add_index :electric_charges, :start_time
-    add_index :electric_charges, :provider_name
-    add_index :electric_charges, :charge_type
-    add_index :electric_charges, [ :location_lat, :location_lng ], name: 'idx_charges_location'
+    # Índices para reportes y queries comunes
+    add_index :vehicle_electric_charges, :charge_start_time
+    add_index :vehicle_electric_charges, [ :tenant_id, :charge_start_time ], name: 'idx_charges_tenant_date'
+    add_index :vehicle_electric_charges, [ :vehicle_id, :charge_start_time ], name: 'idx_charges_vehicle_date'
+    add_index :vehicle_electric_charges, :charge_type
+    add_index :vehicle_electric_charges, :is_estimated
   end
 end
-class CreateRefuels < ActiveRecord::Migration[7.0]
+# db/migrate/YYYYMMDDHHMMSS_create_vehicle_refuelings.rb
+class CreateVehicleRefuelings < ActiveRecord::Migration[7.0]
   def change
-    create_table :refuels do |t|
-      t.references :vehicle, null: false, foreign_key: true
+    create_table :vehicle_refuelings do |t|
+      # Relaciones
+      t.references :tenant, null: false, foreign_key: true, index: true
+      t.references :vehicle, null: false, foreign_key: true, index: true
 
-      # Identificación del proveedor
-      t.string :external_id, null: false
-      t.string :provider_name, null: false
+      # Trazabilidad al dato RAW origen
+      t.references :integration_raw_data,
+                   foreign_key: true,
+                   index: { unique: true, name: 'idx_refuelings_raw_unique' }
+      # UNIQUE: Un raw_data solo puede generar un refueling
+      # NULL permitido: Permite repostajes manuales sin integración
 
-      # Datos normalizados del repostaje
-      t.datetime :refuel_date, null: false
-      t.decimal :volume_liters, precision: 10, scale: 2
-      t.decimal :cost, precision: 10, scale: 2
-      t.string :currency_code, limit: 3
+      # Datos del repostaje
+      t.datetime :refueling_date, null: false
+      # Fecha y hora del repostaje
 
       # Ubicación
-      t.decimal :location_lat, precision: 10, scale: 6
-      t.decimal :location_lng, precision: 10, scale: 6
+      t.decimal :location_lat, precision: 10, scale: 8
+      t.decimal :location_lng, precision: 11, scale: 8
+      # Ejemplo: 41.39719772, 2.12669444
 
-      # Datos del vehículo en el momento del repostaje
+      # Volumen y coste
+      t.decimal :volume_liters, precision: 10, scale: 2, null: false
+      # Litros repostados
+
+      t.decimal :cost, precision: 10, scale: 2
+      t.string :currency, limit: 3
+      # Ejemplo: 85.50 EUR
+
+      # Odómetro
       t.decimal :odometer_km, precision: 12, scale: 2
+      # Kilómetros en el momento del repostaje
+
+      # Tipo de combustible
+      t.string :fuel_type, limit: 50
+      # Ejemplo: 'Diesel', 'Gasolina 95', 'Gasolina 98', 'Unknown'
+
+      # Nivel de confianza del dato
+      t.string :confidence_level, limit: 100
+      # Ejemplo Geotab: "FuelLevel, TripStop"
+
+      # Indicadores
+      t.boolean :is_estimated, default: false, null: false
+      # Si el dato es estimado o medido
+
+      # Capacidad del tanque
       t.decimal :tank_capacity_liters, precision: 10, scale: 2
-      t.decimal :distance_since_last_refuel_km, precision: 10, scale: 2
+      # Capacidad total del tanque del vehículo
 
-      # Metadatos
-      t.string :confidence_level
-      t.string :product_type
-
-      # JSON original del proveedor (para auditoría/debugging)
-      t.jsonb :raw_data, default: {}
+      # Metadata del proveedor (campos adicionales)
+      t.jsonb :provider_metadata, default: {}, null: false
+      # Ejemplo: { "distance": 607451.9, "totalFuelUsed": 57.27, ... }
 
       t.timestamps
     end
 
-    # Evitar duplicados: un vehículo no puede tener dos veces el mismo external_id del mismo proveedor
-    add_index :refuels, [ :vehicle_id, :external_id, :provider_name ],
+    # Índices para reportes y queries comunes
+    add_index :vehicle_refuelings, :refueling_date
+    add_index :vehicle_refuelings, [ :tenant_id, :refueling_date ], name: 'idx_refuelings_tenant_date'
+    add_index :vehicle_refuelings, [ :vehicle_id, :refueling_date ], name: 'idx_refuelings_vehicle_date'
+    add_index :vehicle_refuelings, :is_estimated
+  end
+end
+# db/migrate/YYYYMMDDHHMMSS_create_vehicle_provider_mappings.rb
+class CreateVehicleProviderMappings < ActiveRecord::Migration[7.0]
+  def change
+    create_table :vehicle_provider_mappings do |t|
+      # Relación con vehículo interno
+      t.references :vehicle, null: false, foreign_key: true, index: true
+
+      # Relación con configuración de integración
+      t.references :tenant_integration_configuration,
+                   null: false,
+                   foreign_key: true,
+                   index: { name: 'idx_vpm_config' }
+
+      # ID del vehículo en el proveedor externo
+      t.string :external_vehicle_id, null: false, limit: 100
+      # Ejemplo Geotab: "b1", "b30", "b2E"
+      # Ejemplo Verizon: "VEH-12345"
+
+      # Nombre del vehículo en el proveedor (opcional)
+      t.string :external_vehicle_name, limit: 255
+      # Ejemplo: "Furgoneta Ford - Madrid", "Truck #5"
+
+      # Estado del mapeo
+      t.boolean :is_active, default: true, null: false
+      # Si el mapeo está activo o no
+
+      # Timestamps de mapeo
+      t.datetime :mapped_at
+      # Cuándo se creó el mapeo
+
+      t.datetime :last_sync_at
+      # Cuándo se sincronizó datos por última vez para este vehículo
+
+      # Metadata del vehículo externo
+      t.jsonb :external_metadata, default: {}, null: false
+      # Campos adicionales del proveedor:
+      # {
+      #   "device_serial": "GT8600012345",
+      #   "device_type": "GO9",
+      #   "groups": ["Fleet A", "Madrid"],
+      #   "comment": "Instalado 2024-01-15"
+      # }
+
+      t.timestamps
+    end
+
+    # Índice ÚNICO: Un vehículo solo puede tener un mapeo activo por configuración
+    add_index :vehicle_provider_mappings,
+              [ :vehicle_id, :tenant_integration_configuration_id, :is_active ],
               unique: true,
-              name: 'idx_refuels_vehicle_external'
+              where: "is_active = true",
+              name: 'idx_vpm_vehicle_config_active'
 
-    add_index :refuels, :refuel_date
-    add_index :refuels, :provider_name
-    add_index :refuels, [ :location_lat, :location_lng ], name: 'idx_refuels_location'
-  end
-end
-class CreateTelemetrySyncLogs < ActiveRecord::Migration[7.0]
-  def change
-    create_table :telemetry_sync_logs do |t|
-      t.references :telemetry_credential, null: false, foreign_key: true
-      t.references :vehicle, foreign_key: true # nullable: puede ser sync de toda la flota
+    # Índice ÚNICO: Un external_vehicle_id solo puede estar mapeado una vez por configuración
+    add_index :vehicle_provider_mappings,
+              [ :tenant_integration_configuration_id, :external_vehicle_id ],
+              unique: true,
+              name: 'idx_vpm_config_external'
 
-      # Tipo de sincronización
-      t.string :sync_type, null: false # 'refuels', 'charges', 'full', 'odometer'
-
-      # Estado
-      t.string :status, null: false # 'success', 'error', 'partial'
-
-      # Estadísticas
-      t.integer :records_processed, default: 0
-      t.integer :records_created, default: 0
-      t.integer :records_updated, default: 0
-      t.integer :records_skipped, default: 0
-
-      # Errores
-      t.text :error_message
-      t.jsonb :error_details, default: {}
-
-      # Timing
-      t.datetime :started_at
-      t.datetime :completed_at
-
-      t.timestamps
-    end
-
-    add_index :telemetry_sync_logs, :status
-    add_index :telemetry_sync_logs, :sync_type
-    add_index :telemetry_sync_logs, :started_at
-    add_index :telemetry_sync_logs, [ :telemetry_credential_id, :created_at ],
-              name: 'idx_sync_logs_credential_date'
-  end
-end
-class CreateTelemetryNormalizationErrors < ActiveRecord::Migration[7.0]
-  def change
-    create_table :telemetry_normalization_errors do |t|
-      t.references :telemetry_sync_log, null: false, foreign_key: true
-
-      # Tipo de error
-      t.string :error_type, null: false # 'validation_error', 'mapping_error', 'data_format_error'
-      t.text :error_message, null: false
-
-      # Datos que causaron el error
-      t.jsonb :raw_data, null: false
-
-      # Contexto adicional
-      t.string :provider_name
-      t.string :data_type # 'refuel', 'charge', 'trip'
-
-      # Gestión del error
-      t.boolean :resolved, default: false
-      t.datetime :resolved_at
-      t.text :resolution_notes
-
-      t.timestamps
-    end
-
-    add_index :telemetry_normalization_errors, :error_type
-    add_index :telemetry_normalization_errors, :resolved
-    add_index :telemetry_normalization_errors, :provider_name
-    add_index :telemetry_normalization_errors, :created_at
+    add_index :vehicle_provider_mappings, :external_vehicle_id
+    add_index :vehicle_provider_mappings, :is_active
+    add_index :vehicle_provider_mappings, :last_sync_at
   end
 end
