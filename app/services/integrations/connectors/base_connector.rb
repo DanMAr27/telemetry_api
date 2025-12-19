@@ -1,4 +1,8 @@
 # app/services/integrations/connectors/base_connector.rb
+require "net/http"
+require "uri"
+require "json"
+
 module Integrations
   module Connectors
     class BaseConnector
@@ -23,6 +27,7 @@ module Integrations
       end
 
       protected
+
       # Realizar petición POST
       def http_post(url, body, headers = {})
         uri = URI.parse(url)
@@ -98,6 +103,7 @@ module Integrations
         Rails.logger.debug("  Body: #{response.body[0..200]}...")
       end
 
+      # Excepciones personalizadas
       class ApiError < StandardError; end
       class AuthenticationError < ApiError; end
       class RateLimitError < ApiError; end

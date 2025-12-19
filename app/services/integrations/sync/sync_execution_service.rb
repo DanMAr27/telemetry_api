@@ -2,16 +2,13 @@
 module Integrations
   module Sync
     class SyncExecutionService
-      # Inicializa el servicio con:
-      # - config: TenantIntegrationConfiguration (configuración activa del tenant)
-      # - feature_key: String ('fuel', 'battery', etc.)
-      # - manual: Boolean (si es manual o programada)
-      def initialize(config, feature_key, manual: true)
+      def initialize(config, feature_key, manual: true, date_range: nil)
         @config = config
         @feature_key = feature_key
         @trigger_type = manual ? "manual" : "scheduled"
+        @custom_date_range = date_range
         @execution = nil
-        @session_id = nil
+        @session_data = nil  # Cambiado de @session_id a @session_data
       end
 
       def call
@@ -21,7 +18,7 @@ module Integrations
         # PASO 2: Crear registro de ejecución
         create_execution_record
 
-        # PASO 3: Ejecutar sincronización (en bloque begin/rescue para capturar errores)
+        # PASO 3: Ejecutar sincronización
         begin
           execute_sync_process
 
@@ -38,7 +35,6 @@ module Integrations
           )
 
         rescue StandardError => e
-          # Si algo falla, marcar ejecución como fallida y retornar error
           handle_execution_error(e)
           ServiceResult.failure(
             errors: [ e.message ],
@@ -54,15 +50,9 @@ module Integrations
       # ========================================================================
 
       def valid_configuration?
-        # Verificar que la configuración esté activa
         return false unless @config.is_active
-
-        # Verificar que la feature esté habilitada
         return false unless @config.enabled_features.include?(@feature_key)
-
-        # Verificar que tenga credenciales
         return false unless @config.credentials.present?
-
         true
       end
 
@@ -82,8 +72,6 @@ module Integrations
       def create_execution_record
         @execution = @config.integration_sync_executions.create!(
           feature_key: @feature_key,
-          trigger_type: @trigger_type,
-          status: "running",
           started_at: Time.current,
           metadata: {
             date_range: calculate_date_range,
@@ -99,13 +87,8 @@ module Integrations
       # ========================================================================
 
       def execute_sync_process
-        # PASO 1: Autenticar con el proveedor
         authenticate
-
-        # PASO 2: Obtener datos RAW del proveedor
         fetch_raw_data
-
-        # PASO 3: Normalizar datos
         normalize_data
       end
 
@@ -116,15 +99,19 @@ module Integrations
       def authenticate
         Rails.logger.info("→ Autenticando con #{@config.integration_provider.name}...")
 
-        # Delegar autenticación al servicio especializado
-        auth_result = Authentication::AuthenticateService.new(@config).call
+        auth_result = Integrations::Authentication::AuthenticateService.new(@config).call
 
         if auth_result.failure?
           raise "Error de autenticación: #{auth_result.errors.join(', ')}"
         end
 
-        @session_id = auth_result.data[:session_id]
-        Rails.logger.info("✓ Autenticación exitosa (session: #{@session_id[0..10]}...)")
+        # Ahora guardamos el objeto completo con session_id, database y username
+        @session_data = auth_result.data
+
+        Rails.logger.info("✓ Autenticación exitosa")
+        Rails.logger.info("  - Session: #{@session_data[:session_id][0..10]}...")
+        Rails.logger.info("  - Database: #{@session_data[:database]}")
+        Rails.logger.info("  - Username: #{@session_data[:username]}")
       end
 
       # ------------------------------------------------------------------------
@@ -134,12 +121,13 @@ module Integrations
       def fetch_raw_data
         Rails.logger.info("→ Obteniendo datos RAW de #{@feature_key}...")
 
-        # Delegar fetch al servicio especializado
         date_range = calculate_date_range
-        fetch_result = FetchRawDataService.new(
+
+        # Pasamos session_data completo (no solo session_id)
+        fetch_result = Integrations::Sync::FetchRawDataService.new(
           @execution,
           @config,
-          @session_id,
+          @session_data,  # ✅ Ahora pasa el Hash completo
           @feature_key,
           date_range
         ).call
@@ -161,14 +149,12 @@ module Integrations
       def normalize_data
         Rails.logger.info("→ Normalizando datos...")
 
-        # Delegar normalización al servicio especializado
-        normalize_result = Normalizers::NormalizeDataService.new(
+        normalize_result = Integrations::Normalizers::NormalizeDataService.new(
           @execution,
           @config
         ).call
 
         if normalize_result.failure?
-          # La normalización puede tener errores parciales, no fallamos totalmente
           Rails.logger.warn("⚠ Normalización con errores: #{normalize_result.errors.join(', ')}")
         end
 
@@ -183,10 +169,8 @@ module Integrations
       # ========================================================================
 
       def complete_execution
-        # Obtener estadísticas de los registros RAW
         stats = calculate_statistics
 
-        # Actualizar ejecución con estadísticas finales
         @execution.update!(
           status: "completed",
           finished_at: Time.current,
@@ -252,9 +236,17 @@ module Integrations
       # ========================================================================
 
       def calculate_date_range
-        # Por defecto: desde última sync exitosa o 30 días atrás
-        from_date = @config.last_sync_at || 30.days.ago
+        return @custom_date_range if @custom_date_range.present?
+
+        from_date = if @config.last_sync_at && @config.last_sync_at > 30.days.ago
+                     @config.last_sync_at
+        else
+                     30.days.ago
+        end
+
         to_date = Time.current
+
+        Rails.logger.info("📅 Rango de fechas: #{from_date.strftime('%Y-%m-%d')} → #{to_date.strftime('%Y-%m-%d')}")
 
         { from: from_date, to: to_date }
       end

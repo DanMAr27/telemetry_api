@@ -1,11 +1,14 @@
+Fetch raw data service v2 · RB
+Copiar
+
 # app/services/integrations/sync/fetch_raw_data_service.rb
 module Integrations
   module Sync
     class FetchRawDataService
-      def initialize(execution, config, session_id, feature_key, date_range)
+      def initialize(execution, config, session_data, feature_key, date_range)
         @execution = execution
         @config = config
-        @session_id = session_id
+        @session_data = session_data  # Ahora es un Hash con session_id, database, username
         @feature_key = feature_key
         @date_range = date_range
         @provider = config.integration_provider
@@ -38,7 +41,7 @@ module Integrations
       # ========================================================================
 
       def get_connector
-        Factories::ConnectorFactory.build(@provider.slug)
+        Integrations::Factories::ConnectorFactory.build(@provider.slug)
       end
 
       # ========================================================================
@@ -47,13 +50,14 @@ module Integrations
 
       def fetch_from_provider(connector)
         # Según la feature, llamar al método correspondiente del conector
+        # IMPORTANTE: Ahora pasamos session_data completo (no solo session_id)
         case @feature_key
         when "fuel"
-          connector.fetch_refuelings(@session_id, @date_range[:from], @date_range[:to])
+          connector.fetch_refuelings(@session_data, @date_range[:from], @date_range[:to])
         when "battery"
-          connector.fetch_electric_charges(@session_id, @date_range[:from], @date_range[:to])
+          connector.fetch_electric_charges(@session_data, @date_range[:from], @date_range[:to])
         when "trips"
-          connector.fetch_trips(@session_id, @date_range[:from], @date_range[:to])
+          connector.fetch_trips(@session_data, @date_range[:from], @date_range[:to])
         else
           raise ArgumentError, "Feature no soportada: #{@feature_key}"
         end

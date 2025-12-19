@@ -1,4 +1,6 @@
 # app/services/integrations/connectors/geotab_connector.rb
+require "securerandom"
+
 module Integrations
   module Connectors
     class GeotabConnector < BaseConnector
@@ -28,13 +30,16 @@ module Integrations
         # Verificar respuesta
         if response["result"] && response["result"]["credentials"]
           session_id = response["result"]["credentials"]["sessionId"]
+          database = response["result"]["credentials"]["database"]
+          username = response["result"]["credentials"]["userName"]
 
           Rails.logger.info("✓ Autenticación Geotab exitosa")
 
           {
             success: true,
             session_id: session_id,
-            database: response["result"]["credentials"]["database"],
+            database: database,
+            username: username,
             path: response["result"]["path"]
           }
         else
@@ -57,7 +62,7 @@ module Integrations
       # ========================================================================
       # Geotab usa el tipo "FillUp" para representar repostajes de combustible
 
-      def fetch_refuelings(session_id, from_date, to_date)
+      def fetch_refuelings(session_data, from_date, to_date)
         # Construir payload según documentación de Geotab
         payload = {
           method: "Get",
@@ -67,11 +72,17 @@ module Integrations
               fromDate: format_date(from_date),
               toDate: format_date(to_date)
             },
-            credentials: build_credentials(session_id)
+            credentials: {
+              database: session_data[:database],
+              userName: session_data[:username],
+              sessionId: session_data[:session_id]
+            }
           },
           id: generate_request_id,
           jsonrpc: "2.0"
         }
+
+        Rails.logger.debug("📤 Enviando credentials: database=#{session_data[:database]}, userName=#{session_data[:username]}")
 
         # Realizar petición
         response = http_post(API_BASE_URL, payload)
@@ -95,7 +106,7 @@ module Integrations
       # ========================================================================
       # Geotab usa el tipo "ChargeEvent" para eventos de carga de vehículos eléctricos
 
-      def fetch_electric_charges(session_id, from_date, to_date)
+      def fetch_electric_charges(session_data, from_date, to_date)
         payload = {
           method: "Get",
           params: {
@@ -104,7 +115,11 @@ module Integrations
               fromDate: format_date(from_date),
               toDate: format_date(to_date)
             },
-            credentials: build_credentials(session_id)
+            credentials: {
+              database: session_data[:database],
+              userName: session_data[:username],
+              sessionId: session_data[:session_id]
+            }
           },
           id: generate_request_id,
           jsonrpc: "2.0"
@@ -130,7 +145,7 @@ module Integrations
       # ========================================================================
       # Geotab usa el tipo "Trip" para representar viajes/trayectos
 
-      def fetch_trips(session_id, from_date, to_date)
+      def fetch_trips(session_data, from_date, to_date)
         payload = {
           method: "Get",
           params: {
@@ -139,7 +154,11 @@ module Integrations
               fromDate: format_date(from_date),
               toDate: format_date(to_date)
             },
-            credentials: build_credentials(session_id)
+            credentials: {
+              database: session_data[:database],
+              userName: session_data[:username],
+              sessionId: session_data[:session_id]
+            }
           },
           id: generate_request_id,
           jsonrpc: "2.0"
@@ -190,15 +209,6 @@ module Integrations
       # ========================================================================
       # UTILIDADES
       # ========================================================================
-
-      # Construir objeto credentials para peticiones posteriores
-      def build_credentials(session_id)
-        {
-          database: @database || "database",
-          userName: @username || "user",
-          sessionId: session_id
-        }
-      end
 
       # Formatear fecha al formato que espera Geotab
       # Formato: "2025-01-01T00:00:00.000Z" (ISO 8601)
