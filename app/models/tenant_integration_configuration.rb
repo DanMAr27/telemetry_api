@@ -1,7 +1,7 @@
 # app/models/tenant_integration_configuration.rb
 class TenantIntegrationConfiguration < ApplicationRecord
-  # Encriptación de credenciales
-  encrypts :credentials
+  # Encriptación de credenciales con serialización como Hash
+  encrypts :credentials, deterministic: false
 
   belongs_to :tenant
   belongs_to :integration_provider
@@ -159,17 +159,25 @@ class TenantIntegrationConfiguration < ApplicationRecord
   end
 
   def validate_credentials_structure
-    return unless integration_provider.integration_auth_schema
+    return unless integration_provider&.integration_auth_schema
 
     schema = integration_provider.integration_auth_schema
     required_fields = schema.required_fields.map { |f| f["name"] }
 
-    unless credentials.is_a?(Hash)
-      errors.add(:credentials, "debe ser un objeto JSON válido")
+    # Obtener el valor de credentials
+    creds = credentials
+
+    # Si credentials es nil, salir
+    return if creds.nil?
+
+    # Verificar que sea un Hash
+    unless creds.is_a?(Hash)
+      errors.add(:credentials, "debe ser un objeto JSON válido (recibido: #{creds.class})")
       return
     end
 
-    missing_fields = required_fields - credentials.keys.map(&:to_s)
+    # Validar campos requeridos
+    missing_fields = required_fields - creds.keys.map(&:to_s)
 
     if missing_fields.any?
       errors.add(:credentials, "faltan campos requeridos: #{missing_fields.join(', ')}")

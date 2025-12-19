@@ -128,8 +128,7 @@ ActiveRecord::Schema[8.0].define(version: 13) do
   create_table "tenant_integration_configurations", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.bigint "integration_provider_id", null: false
-    t.text "encrypted_credentials"
-    t.string "encrypted_credentials_iv"
+    t.jsonb "credentials"
     t.boolean "is_active", default: false, null: false
     t.datetime "activated_at"
     t.string "sync_frequency", limit: 20, default: "daily", null: false
