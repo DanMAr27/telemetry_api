@@ -36,7 +36,7 @@ gem "thruster", require: false
 gem "rack-cors"
 
 # API con Grape
-gem "grape", "~> 2.2"
+gem "grape", "~> 3.0"
 gem "grape-entity", "~> 1.0"
 gem "grape-swagger", "~> 2.1"
 gem "grape-swagger-rails", "~> 0.7"
