@@ -1,223 +1,301 @@
 # app/services/integrations/connectors/geotab_connector.rb
-require "securerandom"
-
 module Integrations
   module Connectors
     class GeotabConnector < BaseConnector
-      # URL base de la API de Geotab
       API_BASE_URL = "https://my.geotab.com/apiv1"
+      SESSION_TTL = 2.hours
 
-      # ========================================================================
-      # AUTENTICACIÓN
-      # ========================================================================
-      # Geotab usa un sistema de autenticación que retorna un sessionId
-      # Este sessionId debe usarse en todas las peticiones posteriores
+      def initialize(config)
+        super(config)
 
-      def authenticate(credentials)
-        # Construir payload según documentación de Geotab
+        # Estado de la sesión (se carga desde cache o se autentica)
+        @session_id = nil
+        @database = nil
+        @server_path = nil
+        @username = nil
+
+        # URL dinámica (cambia después de autenticar)
+        @api_url = API_BASE_URL
+      end
+
+
+      # Autenticación con Geotab
+      # Geotab usa un sistema de sesiones:
+      # 1. Envías user/pass/database
+      # 2. Recibes sessionId + server path específico
+      # 3. Usas ese sessionId en todos los requests siguientes
+      def authenticate
+        Rails.logger.info("→ Autenticando con Geotab...")
+
+        # Construir payload de autenticación según API de Geotab
         payload = {
           method: "Authenticate",
           params: {
-            userName: credentials["username"] || credentials[:username],
-            password: credentials["password"] || credentials[:password],
-            database: credentials["database"] || credentials[:database]
+            userName: credentials["username"],
+            password: credentials["password"],
+            database: credentials["database"]
           }
         }
 
-        # Realizar petición
-        response = http_post(API_BASE_URL, payload)
+        begin
+          # Llamar a la API de Geotab
+          response = http_post(@api_url, payload)
 
-        # Verificar respuesta
-        if response["result"] && response["result"]["credentials"]
-          session_id = response["result"]["credentials"]["sessionId"]
-          database = response["result"]["credentials"]["database"]
-          username = response["result"]["credentials"]["userName"]
+          # Verificar respuesta exitosa
+          if response["result"] && response["result"]["credentials"]
+            @session_id = response["result"]["credentials"]["sessionId"]
+            @database = response["result"]["credentials"]["database"]
+            @user_name = response["result"]["credentials"]["userName"]
 
-          Rails.logger.info("✓ Autenticación Geotab exitosa")
+            @server_path = response["result"]["path"]
 
-          {
-            success: true,
-            session_id: session_id,
-            database: database,
-            username: username,
-            path: response["result"]["path"]
-          }
-        else
-          {
-            success: false,
-            error: "Respuesta de autenticación inválida"
-          }
+            @api_url = API_BASE_URL
+
+            cache_session
+
+            Rails.logger.info("✓ Geotab autenticado exitosamente")
+            Rails.logger.info("  Server: #{@api_url}")
+            Rails.logger.info("  Database: #{@database}")
+            Rails.logger.info("  Database: #{@user_name}")
+            Rails.logger.info("  Session: #{@session_id[0..10]}...")
+
+            true
+          else
+            # Respuesta inválida
+            Rails.logger.error("✗ Respuesta de autenticación inválida")
+            raise AuthenticationError, "Respuesta de autenticación inválida"
+          end
+
+        rescue AuthenticationError
+          # Re-lanzar errores de autenticación
+          raise
+        rescue StandardError => e
+          # Capturar otros errores
+          Rails.logger.error("✗ Error en autenticación Geotab: #{e.message}")
+          raise AuthenticationError, "Error de conexión: #{e.message}"
         end
-
-      rescue AuthenticationError => e
-        Rails.logger.error("✗ Error de autenticación Geotab: #{e.message}")
-        { success: false, error: e.message }
-      rescue StandardError => e
-        Rails.logger.error("✗ Error inesperado en autenticación: #{e.message}")
-        { success: false, error: "Error de conexión: #{e.message}" }
       end
 
-      # ========================================================================
-      # OBTENER REPOSTAJES (FillUp)
-      # ========================================================================
-      # Geotab usa el tipo "FillUp" para representar repostajes de combustible
+      # Verificar si hay sesión válida
+      # Intenta cargar desde cache antes de decir que no
+      def authenticated?
+        # Si ya tenemos sessionId en memoria, estamos autenticados
+        return true if @session_id.present?
 
-      def fetch_refuelings(session_data, from_date, to_date)
+        # Intentar cargar desde cache
+        load_from_cache
+      end
+
+      # Geotab no usa headers de autenticación
+      # La autenticación va en el body de cada request
+      def auth_headers
+        {}
+      end
+
+      # OBTENCIÓN DE DATOS - REPOSTAJES (FillUp)
+      def fetch_refuelings(from_date, to_date)
+        Rails.logger.info("→ Obteniendo repostajes de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
+
         # Construir payload según documentación de Geotab
+        # https://geotab.github.io/sdk/software/api/reference/#Get1
         payload = {
           method: "Get",
           params: {
+            # Tipo de entidad: FillUp (repostajes)
             typeName: "FillUp",
+
+            # Búsqueda por rango de fechas
             search: {
-              fromDate: format_date(from_date),
-              toDate: format_date(to_date)
+              FromDate: format_geotab_date(from_date),
+              ToDate: format_geotab_date(to_date)
             },
-            credentials: {
-              database: session_data[:database],
-              userName: session_data[:username],
-              sessionId: session_data[:session_id]
-            }
+
+            # Credenciales de la sesión actual
+            credentials: build_credentials
           },
+
+          # ID único del request (para debugging)
           id: generate_request_id,
+
+          # Versión del protocolo JSON-RPC
           jsonrpc: "2.0"
         }
 
-        Rails.logger.debug("📤 Enviando credentials: database=#{session_data[:database]}, userName=#{session_data[:username]}")
+        # Ejecutar request
+        response = http_post(@api_url, payload)
 
-        # Realizar petición
-        response = http_post(API_BASE_URL, payload)
-
-        # Extraer resultado
-        if response["result"].is_a?(Array)
-          Rails.logger.info("✓ Geotab: #{response['result'].count} repostajes obtenidos")
-          response["result"]
-        else
-          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
-          []
-        end
-
-      rescue StandardError => e
-        Rails.logger.error("✗ Error al obtener repostajes: #{e.message}")
-        raise ApiError, "Error al obtener repostajes: #{e.message}"
+        # Procesar respuesta de Geotab
+        handle_geotab_response(response, "FillUp")
       end
 
-      # ========================================================================
-      # OBTENER CARGAS ELÉCTRICAS (ChargeEvent)
-      # ========================================================================
-      # Geotab usa el tipo "ChargeEvent" para eventos de carga de vehículos eléctricos
+      # OBTENCIÓN DE DATOS - CARGAS ELÉCTRICAS (ChargeEvent)
+      def fetch_electric_charges(from_date, to_date)
+        Rails.logger.info("→ Obteniendo cargas eléctricas de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
 
-      def fetch_electric_charges(session_data, from_date, to_date)
         payload = {
           method: "Get",
           params: {
+            # Tipo de entidad: ChargeEvent (cargas eléctricas)
             typeName: "ChargeEvent",
+
             search: {
-              fromDate: format_date(from_date),
-              toDate: format_date(to_date)
+              fromDate: format_geotab_date(from_date),
+              toDate: format_geotab_date(to_date)
             },
-            credentials: {
-              database: session_data[:database],
-              userName: session_data[:username],
-              sessionId: session_data[:session_id]
-            }
+
+            credentials: build_credentials
           },
+
           id: generate_request_id,
           jsonrpc: "2.0"
         }
 
-        response = http_post(API_BASE_URL, payload)
+        response = http_post(@api_url, payload)
 
-        if response["result"].is_a?(Array)
-          Rails.logger.info("✓ Geotab: #{response['result'].count} cargas eléctricas obtenidas")
-          response["result"]
-        else
-          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
-          []
-        end
-
-      rescue StandardError => e
-        Rails.logger.error("✗ Error al obtener cargas: #{e.message}")
-        raise ApiError, "Error al obtener cargas: #{e.message}"
+        handle_geotab_response(response, "ChargeEvent")
       end
 
-      # ========================================================================
-      # OBTENER VIAJES (Trip)
-      # ========================================================================
-      # Geotab usa el tipo "Trip" para representar viajes/trayectos
+      # OBTENCIÓN DE DATOS - VIAJES (Trip)
+      def fetch_trips(from_date, to_date)
+        Rails.logger.info("→ Obteniendo viajes de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
 
-      def fetch_trips(session_data, from_date, to_date)
         payload = {
           method: "Get",
           params: {
+            # Tipo de entidad: Trip (viajes)
             typeName: "Trip",
+
             search: {
-              fromDate: format_date(from_date),
-              toDate: format_date(to_date)
+              fromDate: format_geotab_date(from_date),
+              toDate: format_geotab_date(to_date)
             },
-            credentials: {
-              database: session_data[:database],
-              userName: session_data[:username],
-              sessionId: session_data[:session_id]
-            }
+
+            credentials: build_credentials
           },
+
           id: generate_request_id,
           jsonrpc: "2.0"
         }
 
-        response = http_post(API_BASE_URL, payload)
+        response = http_post(@api_url, payload)
 
-        if response["result"].is_a?(Array)
-          Rails.logger.info("✓ Geotab: #{response['result'].count} viajes obtenidos")
-          response["result"]
-        else
-          Rails.logger.warn("⚠ Geotab: Respuesta sin resultado")
-          []
-        end
-
-      rescue StandardError => e
-        Rails.logger.error("✗ Error al obtener viajes: #{e.message}")
-        raise ApiError, "Error al obtener viajes: #{e.message}"
+        handle_geotab_response(response, "Trip")
       end
 
-      # ========================================================================
-      # MÉTODOS PARA PRUEBAS DE CONEXIÓN
-      # ========================================================================
-      # Para el botón "Probar Conexión" en la UI
+      protected
 
-      def test_connection(credentials)
-        result = authenticate(credentials)
+      # Sobrescribir para limpiar estado de Geotab
+      def clear_authentication_state
+        @session_id = nil
+        @database = nil
+        @server_path = nil
+        @api_url = API_BASE_URL
+        Rails.cache.delete(cache_key)
 
-        if result[:success]
-          {
-            success: true,
-            message: "Conexión exitosa con Geotab",
-            details: {
-              database: result[:database],
-              session_created: true
-            }
-          }
-        else
-          {
-            success: false,
-            error: result[:error]
-          }
-        end
+        Rails.logger.info("✓ Estado de autenticación limpiado")
       end
 
       private
 
-      # ========================================================================
-      # UTILIDADES
-      # ========================================================================
 
-      # Formatear fecha al formato que espera Geotab
-      # Formato: "2025-01-01T00:00:00.000Z" (ISO 8601)
-      def format_date(date)
+      # Construir objeto credentials para requests
+      # Geotab requiere database + sessionId en cada request
+      def build_credentials
+        {
+          database: @database,
+          userName: @user_name,
+          sessionId: @session_id
+        }
+      end
+
+      # Clave única para el cache de esta configuración
+      def cache_key
+        "geotab_session_#{@config.id}"
+      end
+
+      # Guardar sesión en cache
+      def cache_session
+        session_data = {
+          session_id: @session_id,
+          database: @database,
+          server_path: @server_path
+        }
+
+        Rails.cache.write(
+          cache_key,
+          session_data,
+          expires_in: SESSION_TTL
+        )
+
+        Rails.logger.debug("✓ Sesión cacheada (TTL: #{SESSION_TTL / 60} min)")
+      end
+
+      # Cargar sesión desde cache
+      # @return [Boolean] true si se cargó exitosamente
+      def load_from_cache
+        cached = Rails.cache.read(cache_key)
+        # Validamos que sea un Hash, si es un Array u otra cosa, lo ignoramos
+        return false unless cached.is_a?(Hash)
+
+        # Convertimos a HashWithIndifferentAccess para evitar líos de Symbol vs String
+        cached = cached.with_indifferent_access
+
+        @session_id = cached[:session_id]
+        @database = cached[:database]
+        @server_path = cached[:server_path]
+        @api_url = API_BASE_URL
+
+        Rails.logger.debug("✓ Sesión cargada desde cache")
+        true
+      end
+
+      # Procesar respuesta de Geotab
+      # Geotab usa JSON-RPC, puede retornar:
+      # - { "result": [...] } → éxito
+      # - { "error": { "message": "..." } } → error
+      def handle_geotab_response(response, entity_type)
+        # Caso 1: Error de Geotab
+        if response["error"]
+          error_msg = response["error"]["message"]
+
+          # Si es error de credenciales inválidas, limpiar cache
+          if error_msg.include?("Invalid credentials") ||
+             error_msg.include?("session")
+
+            Rails.logger.warn("⚠ Sesión inválida, limpiando cache...")
+            clear_authentication_state
+
+            # Re-lanzar para que el caller intente de nuevo
+            raise AuthenticationError, "Sesión expirada"
+          end
+
+          # Otro tipo de error
+          raise ApiError, "Geotab error: #{error_msg}"
+        end
+
+        # Caso 2: Respuesta exitosa
+        result = response["result"] || []
+
+        Rails.logger.info("✓ #{result.count} registros de #{entity_type} obtenidos")
+
+        result
+      end
+
+      # Formatear fecha al formato ISO 8601 con milisegundos
+      # Geotab requiere: "2025-01-15T10:30:00.000Z"
+      def format_geotab_date(date)
+        # Asegurar que sea Time
         date = Time.zone.parse(date.to_s) unless date.is_a?(Time)
+
+        # Convertir a UTC y formatear con milisegundos
         date.utc.iso8601(3)
       end
 
-      # Generar ID único para request (para trazabilidad)
+      # Generar ID único para cada request
+      # Útil para debugging y correlacionar logs
       def generate_request_id
         SecureRandom.uuid
       end

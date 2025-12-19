@@ -8,34 +8,25 @@ module Integrations
       end
 
       def call
-        provider = IntegrationProvider.find(@provider_id)
+        # PASO 1: Validar proveedor
+        provider = validate_provider
+        return provider unless provider.is_a?(IntegrationProvider)
 
-        # Validar estructura de credenciales
-        validation_result = validate_credentials_structure(provider, @credentials)
-        return validation_result unless validation_result.success?
-
-        # Obtener el conector apropiado
-        connector = get_connector(provider.slug)
-
-        # Probar conexión
-        result = connector.test_connection(@credentials)
-
-        if result[:success]
-          ServiceResult.success(
-            data: {
-              success: true,
-              message: "Conexión establecida exitosamente",
-              provider_name: provider.name,
-              details: result[:details]
-            }
-          )
-        else
-          ServiceResult.failure(
-            errors: [ result[:error] || "Error al conectar con el proveedor" ]
+        # PASO 2: Verificar que tenga conector implementado
+        unless Factories::ConnectorFactory.provider_available?(provider.slug)
+          return ServiceResult.failure(
+            errors: [ "El proveedor no tiene conector implementado aún" ]
           )
         end
+
+        # PASO 3: Crear configuración temporal (NO se guarda en BD)
+        temp_config = build_temp_config(provider)
+
+        # PASO 4: Intentar autenticar
+        test_authentication(temp_config, provider)
+
       rescue StandardError => e
-        Rails.logger.error("Error al probar conexión: #{e.message}")
+        Rails.logger.error("Error en test de conexión: #{e.message}")
         ServiceResult.failure(
           errors: [ "Error al probar conexión: #{e.message}" ]
         )
@@ -43,36 +34,86 @@ module Integrations
 
       private
 
-      def validate_credentials_structure(provider, credentials)
-        schema = provider.integration_auth_schema
-        return ServiceResult.failure(errors: [ "Proveedor sin schema de autenticación" ]) unless schema
+      def validate_provider
+        provider = IntegrationProvider.find_by(id: @provider_id)
 
-        required_fields = schema.required_fields.map { |f| f["name"] }
-        missing_fields = required_fields - credentials.keys.map(&:to_s)
-
-        if missing_fields.any?
+        unless provider
           return ServiceResult.failure(
-            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+            errors: [ "Proveedor no encontrado" ]
           )
         end
 
-        ServiceResult.success
+        unless provider.available?
+          return ServiceResult.failure(
+            errors: [ "El proveedor no está disponible" ]
+          )
+        end
+
+        provider
       end
 
-      def get_connector(provider_slug)
-        # Factory pattern para obtener el conector correcto
-        # Por ahora retornamos un mock connector
-        # En Fase 3 se implementarán los conectores reales
-        case provider_slug
-        when "geotab"
-          Integrations::Connectors::GeotabConnector.new
-        when "verizon_connect"
-          Integrations::Connectors::VerizonConnector.new
-        when "tomtom_telematics"
-          Integrations::Connectors::TomtomConnector.new
+      def build_temp_config(provider)
+        # Crear instancia SIN guardar en BD
+        TenantIntegrationConfiguration.new(
+          integration_provider: provider,
+          credentials: @credentials,
+          is_active: false # No está activa, es solo para test
+        )
+      end
+
+
+      def test_authentication(temp_config, provider)
+        Rails.logger.info("→ Probando conexión con #{provider.name}...")
+
+        # Construir connector con config temporal
+        connector = ConnectorFactory.build(provider.slug, temp_config)
+
+        # Intentar autenticar
+        auth_result = connector.authenticate
+
+        if auth_result
+          # Autenticación exitosa
+          Rails.logger.info("✓ Conexión exitosa con #{provider.name}")
+
+          ServiceResult.success(
+            data: {
+              success: true,
+              provider_name: provider.name,
+              provider_slug: provider.slug,
+              message: "Conexión establecida exitosamente",
+              tested_at: Time.current
+            }
+          )
         else
-          Integrations::Connectors::MockConnector.new
+          # Autenticación falló
+          ServiceResult.failure(
+            errors: [ "No se pudo establecer conexión con #{provider.name}" ]
+          )
         end
+
+      rescue Integrations::Connectors::BaseConnector::AuthenticationError => e
+        # Error de credenciales
+        Rails.logger.error("✗ Test de conexión falló: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Credenciales inválidas: #{e.message}" ]
+        )
+
+      rescue Integrations::Connectors::BaseConnector::ApiError => e
+        # Error de API
+        Rails.logger.error("✗ Error de API: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Error de conexión: #{e.message}" ]
+        )
+
+      rescue StandardError => e
+        # Otro error
+        Rails.logger.error("✗ Error inesperado: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Error al probar conexión: #{e.message}" ]
+        )
       end
     end
   end

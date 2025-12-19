@@ -51,6 +51,8 @@ gem "dotenv-rails", "~> 3.1"
 
 gem "sprockets-rails"
 gem "kaminari"
+gem "faraday", "~> 2.7"
+
 
 
 group :development, :test do
