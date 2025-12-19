@@ -195,9 +195,9 @@ acme_geotab = TenantIntegrationConfiguration.create!(
   tenant: acme,
   integration_provider: geotab,
   credentials: {
-    database: 'ferrocarrilesgeneralitat',
-    username: 'p.cobo@fastech.tech',
-    password: 'Pacole1519'
+    database: 'database',
+    username: 'user',
+    password: 'psw'
   },
   enabled_features: [ 'fuel' ],
   sync_frequency: 'daily',
