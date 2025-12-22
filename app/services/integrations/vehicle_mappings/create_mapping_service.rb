@@ -20,8 +20,6 @@ module Integrations
             errors: [ "El vehículo externo '#{@external_vehicle_id}' ya está mapeado" ]
           )
         end
-
-        # Crear mapeo
         mapping = @config.vehicle_provider_mappings.build(
           vehicle: @vehicle,
           external_vehicle_id: @external_vehicle_id,

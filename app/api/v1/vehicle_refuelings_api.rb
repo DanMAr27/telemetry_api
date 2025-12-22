@@ -78,8 +78,6 @@ module V1
       end
       get "statistics" do
         refuelings = VehicleRefueling.all
-
-        # Aplicar filtros
         refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
         refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
 

@@ -74,7 +74,6 @@ module Integrations
       end
 
       def delete_single_record(raw_data)
-        # Guardar metadata antes de eliminar
         raw_data.update!(
           metadata: (raw_data.metadata || {}).merge(
             deleted_at: Time.current.iso8601,
@@ -84,7 +83,6 @@ module Integrations
           ).compact
         )
 
-        # Soft delete
         if raw_data.respond_to?(:deleted_at=)
           raw_data.update!(deleted_at: Time.current)
         else

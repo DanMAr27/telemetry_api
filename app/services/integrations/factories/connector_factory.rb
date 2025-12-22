@@ -57,36 +57,6 @@ module Integrations
       def self.provider_available?(provider_slug)
         available_providers.include?(provider_slug.to_s.downcase)
       end
-
-      # Obtener información sobre proveedores disponibles
-      def self.providers_info
-        {
-          geotab: {
-            name: "Geotab",
-            auth_type: "session",
-            features: [ "fuel", "battery", "trips" ],
-            implemented: true
-          },
-          verizon_connect: {
-            name: "Verizon Connect",
-            auth_type: "token",
-            features: [ "fuel", "trips" ],
-            implemented: false
-          },
-          tomtom_telematics: {
-            name: "TomTom Webfleet",
-            auth_type: "basic_auth",
-            features: [ "fuel", "trips" ],
-            implemented: false
-          },
-          samsara: {
-            name: "Samsara",
-            auth_type: "oauth2",
-            features: [ "fuel", "battery", "trips" ],
-            implemented: false
-          }
-        }
-      end
     end
   end
 end

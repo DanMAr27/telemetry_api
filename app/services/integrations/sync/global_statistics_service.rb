@@ -18,7 +18,7 @@ module Integrations
         executions_query = build_executions_query
         raw_data_query = build_raw_data_query
 
-        Rails.logger.info("📊 GlobalStatisticsService - Iniciando cálculo")
+        Rails.logger.info(" GlobalStatisticsService - Iniciando cálculo")
         Rails.logger.info("  Período: #{@from_date} → #{@to_date}")
         Rails.logger.info("  Ejecuciones encontradas: #{executions_query.count}")
         Rails.logger.info("  Raw data encontrados: #{raw_data_query.count}")
@@ -61,7 +61,7 @@ module Integrations
 
         ServiceResult.success(data: data)
       rescue StandardError => e
-        Rails.logger.error("❌ Error en GlobalStatisticsService: #{e.message}")
+        Rails.logger.error("   Error en GlobalStatisticsService: #{e.message}")
         Rails.logger.error("   Clase: #{e.class.name}")
         Rails.logger.error("   Backtrace: #{e.backtrace.first(5).join("\n   ")}")
         ServiceResult.failure(errors: [ "Error al calcular estadísticas: #{e.message}" ])

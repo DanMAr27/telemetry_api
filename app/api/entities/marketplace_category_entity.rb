@@ -12,7 +12,7 @@ module Entities
                     .includes(:integration_features, :integration_auth_schema)
       Entities::MarketplaceProviderEntity.represent(
         providers,
-        include_category: false,  # Ya están dentro de una categoría
+        include_category: false,
         include_features: options[:include_features],
         include_auth_info: options[:include_auth_info],
         include_stats: options[:include_stats]

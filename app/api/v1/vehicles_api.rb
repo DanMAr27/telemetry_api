@@ -146,6 +146,30 @@ module V1
         }
       end
 
+      desc "Obtener resumen de la flota de vehículos" do
+        detail "Retorna estadísticas agregadas de todos los vehículos"
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+      end
+      get "summary" do
+        vehicles = Vehicle.all
+        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+
+        {
+          total_vehicles: vehicles.count,
+          by_status: vehicles.group(:status).count,
+          by_fuel_type: vehicles.group(:fuel_type).count,
+          by_vehicle_type: vehicles.group(:vehicle_type).count,
+          electric_vehicles: vehicles.electric.count,
+          combustion_vehicles: vehicles.combustion.count,
+          with_telemetry: vehicles.joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct.count,
+          needs_maintenance: vehicles.select(&:needs_maintenance?).count
+        }
+      end
+
       route_param :id do
         desc "Obtener detalle de un vehículo" do
           detail "Retorna información completa de un vehículo"
@@ -459,29 +483,6 @@ module V1
             message: "Vehículo no encontrado"
           }, 404)
         end
-      end
-      desc "Obtener resumen de la flota de vehículos" do
-        detail "Retorna estadísticas agregadas de todos los vehículos"
-      end
-      params do
-        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
-      end
-      get "summary" do
-        vehicles = Vehicle.all
-        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
-
-        {
-          total_vehicles: vehicles.count,
-          by_status: vehicles.group(:status).count,
-          by_fuel_type: vehicles.group(:fuel_type).count,
-          by_vehicle_type: vehicles.group(:vehicle_type).count,
-          electric_vehicles: vehicles.electric.count,
-          combustion_vehicles: vehicles.combustion.count,
-          with_telemetry: vehicles.joins(:vehicle_provider_mappings)
-            .where(vehicle_provider_mappings: { is_active: true })
-            .distinct.count,
-          needs_maintenance: vehicles.select(&:needs_maintenance?).count
-        }
       end
     end
   end

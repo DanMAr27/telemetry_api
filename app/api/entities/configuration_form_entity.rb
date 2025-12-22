@@ -65,21 +65,5 @@ module Entities
         ]
       }
     end
-    # expose :validation_rules do |provider, _options|
-    #   schema = provider.integration_auth_schema
-    #   next {} unless schema
-
-    #   rules = {}
-    #   schema.auth_fields.each do |field|
-    #     rules[field["name"]] = {
-    #       required: field["required"] || false,
-    #       type: field["type"],
-    #       min_length: field["min_length"],
-    #       max_length: field["max_length"],
-    #       pattern: field["pattern"]
-    #     }.compact
-    #   end
-    #   rules
-    # end
   end
 end

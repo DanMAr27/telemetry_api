@@ -10,7 +10,6 @@ module Integrations
         query = build_query
         total = query.count
 
-        # Aplicar paginación
         page = @filters[:page] || 1
         per_page = [ @filters[:per_page] || 50, 500 ].min
 
@@ -43,27 +42,21 @@ module Integrations
 
       def build_query
         query = IntegrationRawData.all
-
-        # Includes para optimizar
         query = query.includes(:tenant_integration_configuration,
                                :integration_sync_execution,
                                :normalized_record)
-
-        # Filtros básicos
         query = query.where(tenant_id: @filters[:tenant_id]) if @filters[:tenant_id]
         query = query.where(tenant_integration_configuration_id: @filters[:integration_id]) if @filters[:integration_id]
         query = query.where(feature_key: @filters[:feature_key]) if @filters[:feature_key]
         query = query.where(provider_slug: @filters[:provider_slug]) if @filters[:provider_slug]
         query = query.where(external_id: @filters[:external_id]) if @filters[:external_id]
 
-        # Filtro de estado
         if @filters[:status].present?
           query = query.where(processing_status: @filters[:status])
         elsif @filters[:status_in].present?
           query = query.where(processing_status: @filters[:status_in])
         end
 
-        # Filtros de fecha
         if @filters[:from_date]
           query = query.where("created_at >= ?", @filters[:from_date].beginning_of_day)
         end
@@ -80,7 +73,6 @@ module Integrations
           query = query.where("created_at <= ?", @filters[:created_before])
         end
 
-        # Filtro de sync execution
         query = query.where(integration_sync_execution_id: @filters[:sync_execution_id]) if @filters[:sync_execution_id]
 
         if @filters[:only_latest_sync] && @filters[:integration_id]
@@ -92,7 +84,6 @@ module Integrations
           query = query.where(integration_sync_execution_id: latest_exec&.id) if latest_exec
         end
 
-        # Filtros de error
         if @filters[:has_error] == true
           query = query.where.not(normalization_error: nil)
         elsif @filters[:has_error] == false
@@ -109,7 +100,6 @@ module Integrations
           end
         end
 
-        # Filtro de tipo normalizado
         query = query.where(normalized_record_type: @filters[:normalized_type]) if @filters[:normalized_type]
 
         if @filters[:has_normalized_record] == true
@@ -118,7 +108,6 @@ module Integrations
           query = query.where(normalized_record_id: nil)
         end
 
-        # Ordenamiento
         sort_by = @filters[:sort_by] || "created_at"
         sort_order = @filters[:sort_order] || "desc"
 
@@ -128,7 +117,6 @@ module Integrations
       end
 
       def calculate_summary(query, total)
-        # Usar reorder(nil) para remover el ORDER BY antes del GROUP BY
         by_status = query.reorder(nil).group(:processing_status).count
 
         {

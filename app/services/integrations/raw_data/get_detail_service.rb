@@ -18,11 +18,7 @@ module Integrations
         unless raw_data
           return ServiceResult.failure(errors: [ "Registro no encontrado" ])
         end
-
-        # Construir data completa
         data = raw_data
-
-        # Si se solicitan registros similares, buscarlos
         if @options[:include_similar]
           data.define_singleton_method(:similar_records) do
             find_similar_records(raw_data)
@@ -38,8 +34,6 @@ module Integrations
 
       def find_similar_records(raw_data)
         return nil unless raw_data.processing_status == "failed"
-
-        # Extraer la parte clave del error
         key_error = extract_key_error_part(raw_data.normalization_error)
 
         similar = IntegrationRawData

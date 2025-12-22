@@ -113,7 +113,7 @@ module V1
         detail "Retorna las opciones válidas para configurar la frecuencia de sincronización"
       end
       get "schedule-options" do
-        present({}, with: Entities::SyncScheduleOptionsEntity)
+        present OpenStruct.new, with: Entities::SyncScheduleOptionsEntity
       end
 
       route_param :id do

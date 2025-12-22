@@ -8,7 +8,6 @@ module Integrations
       end
 
       def call
-        # Si se actualizan credenciales, marcar para revalidación
         if @params.key?(:credentials) && @params[:credentials] != @config.credentials
           @params[:last_sync_status] = nil
           @params[:last_sync_error] = nil

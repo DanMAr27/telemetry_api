@@ -23,8 +23,6 @@ module Integrations
             errors: [ "Ya existe una configuración para este proveedor" ]
           )
         end
-
-        # Crear configuración
         config = @tenant.tenant_integration_configurations.build(
           integration_provider: provider,
           credentials: @params[:credentials],

@@ -69,54 +69,55 @@ module V1
         end
       end
 
-      desc "Obtener estadísticas de raw data" do
-        detail "Calcula métricas agregadas de registros RAW"
-      end
-      params do
-        optional :tenant_id, type: Integer
-        optional :integration_id, type: Integer
-        optional :from_date, type: Date, default: -> { 30.days.ago.to_date }
-        optional :to_date, type: Date, default: -> { Date.current }
-        optional :group_by, type: String, values: %w[day hour status feature provider]
-      end
-      get "statistics" do
-        result = Integrations::RawData::StatisticsService.new(
-          filters: declared(params, include_missing: false)
-        ).call
+      # TODO
+      # desc "Obtener estadísticas de raw data" do
+      #   detail "Calcula métricas agregadas de registros RAW"
+      # end
+      # params do
+      #   optional :tenant_id, type: Integer
+      #   optional :integration_id, type: Integer
+      #   optional :from_date, type: Date, default: -> { 30.days.ago.to_date }
+      #   optional :to_date, type: Date, default: -> { Date.current }
+      #   optional :group_by, type: String, values: %w[day hour status feature provider]
+      # end
+      # get "statistics" do
+      #   result = Integrations::RawData::StatisticsService.new(
+      #     filters: declared(params, include_missing: false)
+      #   ).call
+      #   if result.success?
+      #     present result.data, with: Entities::RawDataStatisticsEntity
+      #   else
+      #     error!({
+      #       error: "statistics_failed",
+      #       message: result.errors.join(", ")
+      #     }, 500)
+      #   end
+      # end
 
-        if result.success?
-          present result.data, with: Entities::RawDataStatisticsEntity
-        else
-          error!({
-            error: "statistics_failed",
-            message: result.errors.join(", ")
-          }, 500)
-        end
-      end
+      # TODO
+      # desc "Obtener timeline de procesamiento" do
+      #   detail "Muestra línea temporal del procesamiento de registros"
+      # end
+      # params do
+      #   optional :sync_execution_id, type: Integer
+      #   optional :integration_id, type: Integer
+      #   optional :from_time, type: DateTime
+      #   optional :to_time, type: DateTime
+      # end
+      # get "timeline" do
+      #   result = Integrations::RawData::TimelineService.new(
+      #     filters: declared(params, include_missing: false)
+      #   ).call
 
-      desc "Obtener timeline de procesamiento" do
-        detail "Muestra línea temporal del procesamiento de registros"
-      end
-      params do
-        optional :sync_execution_id, type: Integer
-        optional :integration_id, type: Integer
-        optional :from_time, type: DateTime
-        optional :to_time, type: DateTime
-      end
-      get "timeline" do
-        result = Integrations::RawData::TimelineService.new(
-          filters: declared(params, include_missing: false)
-        ).call
-
-        if result.success?
-          present result.data
-        else
-          error!({
-            error: "timeline_failed",
-            message: result.errors.join(", ")
-          }, 500)
-        end
-      end
+      #   if result.success?
+      #     present result.data
+      #   else
+      #     error!({
+      #       error: "timeline_failed",
+      #       message: result.errors.join(", ")
+      #     }, 500)
+      #   end
+      # end
 
       desc "Obtener detalle completo de un registro" do
         detail "Retorna información detallada de un registro RAW específico"

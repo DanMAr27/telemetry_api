@@ -73,8 +73,6 @@ module Integrations
         previous_status = raw_data.processing_status
 
         raw_data.reset_for_reprocessing!
-
-        # Añadir metadata de reset
         raw_data.update!(
           metadata: (raw_data.metadata || {}).merge(
             reset_at: Time.current.iso8601,

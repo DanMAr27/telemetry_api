@@ -64,15 +64,10 @@ module Integrations
 
       def test_authentication(temp_config, provider)
         Rails.logger.info("→ Probando conexión con #{provider.name}...")
-
-        # Construir connector con config temporal
         connector = ConnectorFactory.build(provider.slug, temp_config)
-
-        # Intentar autenticar
         auth_result = connector.authenticate
 
         if auth_result
-          # Autenticación exitosa
           Rails.logger.info("✓ Conexión exitosa con #{provider.name}")
 
           ServiceResult.success(
@@ -85,14 +80,12 @@ module Integrations
             }
           )
         else
-          # Autenticación falló
           ServiceResult.failure(
             errors: [ "No se pudo establecer conexión con #{provider.name}" ]
           )
         end
 
       rescue Integrations::Connectors::BaseConnector::AuthenticationError => e
-        # Error de credenciales
         Rails.logger.error("✗ Test de conexión falló: #{e.message}")
 
         ServiceResult.failure(
@@ -100,7 +93,6 @@ module Integrations
         )
 
       rescue Integrations::Connectors::BaseConnector::ApiError => e
-        # Error de API
         Rails.logger.error("✗ Error de API: #{e.message}")
 
         ServiceResult.failure(
@@ -108,7 +100,6 @@ module Integrations
         )
 
       rescue StandardError => e
-        # Otro error
         Rails.logger.error("✗ Error inesperado: #{e.message}")
 
         ServiceResult.failure(

@@ -1,40 +1,29 @@
 # app/api/entities/integration_raw_data_detail_entity.rb
 module Entities
   class IntegrationRawDataDetailEntity < Grape::Entity
-    # Información básica
     expose :id
     expose :integration_sync_execution_id
     expose :tenant_integration_configuration_id
-
     expose :provider_slug
     expose :feature_key
     expose :external_id
-
-    # Estado y procesamiento
     expose :processing_status
     expose :normalization_error
     expose :normalized_at
     expose :created_at
     expose :updated_at
-
-    # Raw data completo
     expose :raw_data
-
-    # Metadata extendida
     expose :metadata do |obj|
       base = obj.metadata || {}
 
       base.merge({
         retry_count: obj.retry_count || 0,
         last_retry_at: obj.last_retry_at,
-        # Llamada corregida indicando la clase:
         error_type: Entities::IntegrationRawDataDetailEntity.detect_error_type(obj),
         processing_duration_ms: Entities::IntegrationRawDataDetailEntity.calculate_duration(obj),
         normalizer_class: "#{obj.provider_slug.classify}::#{obj.feature_key.classify}Normalizer"
       })
     end
-
-    # Sync execution completa
     expose :sync_execution do |obj|
       next nil unless obj.integration_sync_execution
 
@@ -51,8 +40,6 @@ module Entities
         url: "/api/v1/integrations/#{obj.tenant_integration_configuration_id}/sync-executions/#{exec.id}"
       }
     end
-
-    # Configuración
     expose :configuration do |obj|
       next nil unless obj.tenant_integration_configuration
 
@@ -70,8 +57,6 @@ module Entities
         }
       }
     end
-
-    # Normalized record completo
     expose :normalized_record do |obj|
       next nil unless obj.normalized_record
 
@@ -122,20 +107,14 @@ module Entities
         }
       end
     end
-
-    # Timeline de eventos
     expose :timeline do |obj|
       events = []
-
-      # Creación
       events << {
         timestamp: obj.created_at,
         event: "created",
         status: "pending",
         description: "Registro raw creado"
       }
-
-      # Normalización (éxito o error)
       if obj.normalized_at
         events << {
           timestamp: obj.normalized_at,
@@ -147,12 +126,10 @@ module Entities
           error: obj.normalization_error
         }
       end
-
-      # Reintentos
       if obj.retry_count && obj.retry_count > 0
         (1..obj.retry_count).each do |attempt|
           events << {
-            timestamp: obj.last_retry_at, # Simplificado, idealmente guardar cada timestamp
+            timestamp: obj.last_retry_at,
             event: "retry_attempted",
             status: obj.processing_status,
             description: "Reintento #{attempt} - #{obj.processing_status == 'failed' ? 'Fallido' : 'Exitoso'}",
@@ -160,17 +137,11 @@ module Entities
           }
         end
       end
-
-      # Ordenar por timestamp
       events.sort_by { |e| e[:timestamp] }
     end
-
-    # Registros similares (mismo error/vehículo)
     expose :similar_records do |obj, opts|
       next nil unless opts[:include_similar]
       next nil unless obj.processing_status == "failed"
-
-      # Buscar registros con el mismo error
       similar = IntegrationRawData
         .where(tenant_integration_configuration_id: obj.tenant_integration_configuration_id)
         .where(processing_status: "failed")
@@ -192,8 +163,6 @@ module Entities
         suggestion: build_similarity_suggestion(obj, similar)
       }
     end
-
-    # Acciones disponibles
     expose :available_actions do |obj, opts|
       Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
     end
@@ -225,16 +194,11 @@ module Entities
     end
 
     def self.extract_key_error_part(error_message)
-      # Extraer la parte clave del error para buscar similares
       return "" unless error_message
-
-      # Si contiene "vehicle mapping", extraer el external_id
       if error_message.include?("mapping not found")
         match = error_message.match(/external_id[:\s]+([a-zA-Z0-9_-]+)/)
         return "external_id: #{match[1]}" if match
       end
-
-      # Si es otro tipo de error, tomar las primeras palabras clave
       error_message.split(":").first&.strip || error_message[0..50]
     end
 

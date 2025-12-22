@@ -58,7 +58,6 @@ module Entities
       Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
     end
 
-    # Define el método como un método de CLASE (self.)
     def self.build_available_actions(obj, _opts = {})
       actions = []
 

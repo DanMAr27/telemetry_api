@@ -117,7 +117,7 @@ module Integrations
         # LLAMADA AL CONNECTOR CON FECHAS
         raw_response = @connector.fetch_data(
           @feature_key,
-          date_range[:from],  # ← Estas son las fechas que van al connector
+          date_range[:from],
           date_range[:to]
         )
 
@@ -234,11 +234,11 @@ module Integrations
       def status_emoji
         case @execution.status
         when "completed"
-          @stats[:failed] > 0 ? "⚠️" : "✅"
+          @stats[:failed] > 0 ? "Warning" : "OK"
         when "failed"
-          "❌"
+          "failed"
         else
-          "ℹ️"
+          "Otros"
         end
       end
 
@@ -260,7 +260,7 @@ module Integrations
 
       def handle_execution_error(error)
         Rails.logger.error("=" * 70)
-        Rails.logger.error("❌ Error en sincronización ##{@execution&.id}")
+        Rails.logger.error("Error en sincronización ##{@execution&.id}")
         Rails.logger.error("   Mensaje: #{error.message}")
         Rails.logger.error("   Tipo: #{error.class.name}")
         Rails.logger.error("=" * 70)
@@ -297,7 +297,6 @@ module Integrations
           }
         elsif manual_sync?
           # Sincronización manual: traer últimos 30 días siempre
-          # (el usuario está ejecutando manualmente, probablemente quiere ver datos recientes)
           {
             from: 30.days.ago.beginning_of_day,
             to: Time.current,
