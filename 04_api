@@ -1,0 +1,2257 @@
+# app/api/v1/integration_configurations_api.rb
+module V1
+  class IntegrationConfigurationsApi < Grape::API
+    resource :integrations do
+      desc "Listar todas las configuraciones de integraciones" do
+        detail "Retorna lista paginada de configuraciones con filtros opcionales"
+        success Entities::TenantIntegrationConfigurationSummaryEntity
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :provider_slug, type: String, desc: "Filtrar por slug del proveedor"
+        optional :is_active, type: Boolean, desc: "Filtrar por estado activo/inactivo"
+        optional :status, type: String, values: %w[success error], desc: "Filtrar por último estado de sync"
+        optional :page, type: Integer, default: 1, desc: "Número de página"
+        optional :per_page, type: Integer, default: 50, values: 1..100, desc: "Registros por página"
+      end
+      get do
+        integrations = TenantIntegrationConfiguration
+          .includes(:integration_provider, :tenant)
+
+        integrations = integrations.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+        integrations = integrations.where(is_active: params[:is_active]) unless params[:is_active].nil?
+        integrations = integrations.where(last_sync_status: params[:status]) if params[:status]
+
+        if params[:provider_slug]
+          integrations = integrations
+            .joins(:integration_provider)
+            .where(integration_providers: { slug: params[:provider_slug] })
+        end
+
+        integrations = integrations.order(created_at: :desc)
+        total = integrations.count
+
+        integrations = integrations
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          configurations: Entities::TenantIntegrationConfigurationSummaryEntity.represent(integrations),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Crear nueva configuración de integración" do
+        detail "Crea una configuración de integración. Alternativa al endpoint marketplace/setup"
+        success Entities::TenantIntegrationConfigurationEntity
+      end
+      params do
+        requires :tenant_id, type: Integer, desc: "ID del tenant"
+        requires :integration_provider_id, type: Integer, desc: "ID del proveedor de integración"
+        requires :credentials, type: Hash, desc: "Credenciales de autenticación"
+        requires :enabled_features, type: Array[String], desc: "Features a habilitar"
+        optional :sync_frequency, type: String, values: %w[daily weekly monthly], default: "daily"
+        optional :sync_hour, type: Integer, values: 0..23, default: 2
+        optional :sync_day_of_week, type: Integer, values: 0..6
+        optional :sync_day_of_month, type: String, values: %w[start end]
+        optional :sync_config, type: Hash, default: {}
+        optional :is_active, type: Boolean, default: false
+      end
+      post do
+        tenant = Tenant.find(params[:tenant_id])
+        provider = IntegrationProvider.find(params[:integration_provider_id])
+
+        existing = tenant.tenant_integration_configurations
+          .find_by(integration_provider_id: provider.id)
+
+        if existing
+          error!({
+            error: "duplicate_configuration",
+            message: "Ya existe una configuración para este proveedor",
+            existing_configuration_id: existing.id
+          }, 422)
+        end
+
+        config = tenant.tenant_integration_configurations.build(
+          integration_provider: provider,
+          credentials: params[:credentials],
+          enabled_features: params[:enabled_features],
+          sync_frequency: params[:sync_frequency],
+          sync_hour: params[:sync_hour],
+          sync_day_of_week: params[:sync_day_of_week],
+          sync_day_of_month: params[:sync_day_of_month],
+          sync_config: params[:sync_config],
+          is_active: params[:is_active]
+        )
+
+        if config.save
+          present config,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_provider: true,
+                  include_tenant: true,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: config.errors.full_messages.join(", "),
+            details: config.errors.messages
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound => e
+        error!({
+          error: "not_found",
+          message: e.message
+        }, 404)
+      end
+
+      desc "Obtener opciones disponibles para programación de sincronización" do
+        detail "Retorna las opciones válidas para configurar la frecuencia de sincronización"
+      end
+      get "schedule-options" do
+        present({}, with: Entities::SyncScheduleOptionsEntity)
+      end
+
+      route_param :id do
+        before do
+          @config = TenantIntegrationConfiguration.find(params[:id])
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Configuración no encontrada"
+          }, 404)
+        end
+
+        desc "Obtener detalle completo de una configuración" do
+          detail "Retorna información detallada de una configuración específica"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        params do
+          optional :include_provider, type: Boolean, default: true
+          optional :include_tenant, type: Boolean, default: true
+          optional :include_features, type: Boolean, default: true
+          optional :include_computed, type: Boolean, default: true
+        end
+        get do
+          present @config,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_provider: params[:include_provider],
+                  include_tenant: params[:include_tenant],
+                  include_features: params[:include_features],
+                  include_computed: params[:include_computed]
+        end
+
+        desc "Actualizar configuración completa" do
+          detail "Actualiza múltiples campos de la configuración a la vez"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        params do
+          optional :credentials, type: Hash
+          optional :enabled_features, type: Array[String]
+          optional :sync_frequency, type: String, values: %w[daily weekly monthly]
+          optional :sync_hour, type: Integer, values: 0..23
+          optional :sync_day_of_week, type: Integer, values: 0..6
+          optional :sync_day_of_month, type: String, values: %w[start end]
+          optional :sync_config, type: Hash
+        end
+        put do
+          result = Integrations::TenantConfigurations::UpdateService.new(
+            @config,
+            declared(params, include_missing: false)
+          ).call
+
+          if result.success?
+            present result.data,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true,
+                    include_provider: true
+          else
+            error!({
+              error: "validation_error",
+              message: result.errors.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Eliminar configuración de integración" do
+          detail "Elimina una configuración. Debe estar inactiva primero."
+        end
+        delete do
+          result = Integrations::TenantConfigurations::DestroyService.new(@config).call
+
+          if result.success?
+            { success: true, message: result.message }
+          else
+            error!({
+              error: "deletion_error",
+              message: result.errors.join(", ")
+            }, 422)
+          end
+        end
+
+
+        desc "Actualizar solo las credenciales de autenticación" do
+          detail "Actualiza únicamente las credenciales sin tocar otros campos"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        params do
+          requires :credentials, type: Hash, desc: "Nuevas credenciales de autenticación"
+          optional :test_connection_after, type: Boolean, default: false,
+                   desc: "Probar conexión después de actualizar"
+        end
+        put "credentials" do
+          was_active = @config.is_active
+          @config.update!(is_active: false) if was_active
+
+          if @config.update(credentials: params[:credentials])
+            @config.update!(last_sync_status: nil, last_sync_error: nil)
+
+            if params[:test_connection_after]
+              test_result = Integrations::TenantConfigurations::TestConnectionService.new(
+                @config.integration_provider.id,
+                params[:credentials]
+              ).call
+
+              unless test_result.success?
+                error!({
+                  error: "connection_test_failed",
+                  message: "Credenciales actualizadas pero el test de conexión falló: #{test_result.errors.join(', ')}",
+                  config: Entities::TenantIntegrationConfigurationEntity.represent(
+                    @config,
+                    include_computed: true
+                  )
+                }, 422)
+              end
+            end
+
+            @config.update!(is_active: true) if was_active
+
+            present @config,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true,
+                    include_provider: true
+          else
+            error!({
+              error: "validation_error",
+              message: @config.errors.full_messages.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Actualizar features habilitadas" do
+          detail "Actualiza qué funcionalidades están habilitadas para sincronizar"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        params do
+          requires :enabled_features, type: Array[String],
+                   desc: "Array de feature keys a habilitar"
+        end
+        put "features" do
+          available_features = @config.integration_provider
+            .integration_features
+            .active
+            .pluck(:feature_key)
+
+          invalid_features = params[:enabled_features] - available_features
+
+          if invalid_features.any?
+            error!({
+              error: "invalid_features",
+              message: "Features no disponibles: #{invalid_features.join(', ')}",
+              available_features: available_features
+            }, 422)
+          end
+
+          if @config.update(enabled_features: params[:enabled_features])
+            present @config,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true,
+                    include_features: true
+          else
+            error!({
+              error: "validation_error",
+              message: @config.errors.full_messages.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Actualizar configuración de programación" do
+          detail "Actualiza cuándo y con qué frecuencia se sincroniza"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        params do
+          requires :sync_frequency, type: String, values: %w[daily weekly monthly]
+          requires :sync_hour, type: Integer, values: 0..23
+          optional :sync_day_of_week, type: Integer, values: 0..6,
+                   desc: "Día de la semana (0=Domingo, 6=Sábado) - solo para frecuencia semanal"
+          optional :sync_day_of_month, type: String, values: %w[start end],
+                   desc: "Día del mes (start=primer día, end=último día) - solo para frecuencia mensual"
+        end
+        put "schedule" do
+          update_params = {
+            sync_frequency: params[:sync_frequency],
+            sync_hour: params[:sync_hour],
+            sync_day_of_week: params[:sync_day_of_week],
+            sync_day_of_month: params[:sync_day_of_month]
+          }
+
+          if @config.update(update_params)
+            present @config,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true
+          else
+            error!({
+              error: "validation_error",
+              message: @config.errors.full_messages.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Activar configuración de integración" do
+          detail "Activa la configuración para permitir sincronizaciones automáticas"
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        post "activate" do
+          result = Integrations::TenantConfigurations::ActivateService.new(@config).call
+
+          if result.success?
+            present result.data,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true
+          else
+            error!({
+              error: "activation_error",
+              message: result.errors.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Desactivar configuración de integración" do
+          detail "Desactiva la configuración. No se sincronizará automáticamente."
+          success Entities::TenantIntegrationConfigurationEntity
+        end
+        post "deactivate" do
+          result = Integrations::TenantConfigurations::DeactivateService.new(@config).call
+
+          if result.success?
+            present result.data,
+                    with: Entities::TenantIntegrationConfigurationEntity,
+                    include_computed: true
+          else
+            error!({
+              error: "deactivation_error",
+              message: result.errors.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Probar conexión de una configuración existente" do
+          detail "Prueba la conexión con las credenciales actuales o con credenciales de prueba"
+          success Entities::ConnectionTestResultEntity
+        end
+        params do
+          optional :use_new_credentials, type: Hash,
+                   desc: "Probar con credenciales diferentes sin guardarlas (opcional)"
+        end
+        post "test-connection" do
+          credentials_to_test = params[:use_new_credentials] || @config.credentials
+
+          result = Integrations::TenantConfigurations::TestConnectionService.new(
+            @config.integration_provider.id,
+            credentials_to_test
+          ).call
+
+          if result.success?
+            present result.data, with: Entities::ConnectionTestResultEntity
+          else
+            error!({
+              error: "connection_failed",
+              message: result.errors.join(", ")
+            }, 422)
+          end
+        end
+
+        desc "Sincronizar una feature específica" do
+          detail "Ejecuta sincronización manual para una feature. " \
+                 "Crea una nueva ejecución que puede consultarse en /sync_executions"
+          success Entities::SyncResultEntity
+        end
+        params do
+          requires :feature_key,
+                   type: String,
+                   values: %w[fuel battery trips real_time_location odometer diagnostics],
+                   desc: "Feature a sincronizar"
+        end
+        post "sync" do
+          unless @config.is_active
+            error!({
+              error: "inactive_configuration",
+              message: "La configuración debe estar activa para sincronizar"
+            }, 422)
+          end
+
+          unless @config.feature_enabled?(params[:feature_key])
+            error!({
+              error: "feature_not_enabled",
+              message: "La feature '#{params[:feature_key]}' no está habilitada",
+              enabled_features: @config.enabled_features,
+              hint: "Habilita esta feature primero usando PUT /integrations/#{@config.id}/features"
+            }, 422)
+          end
+
+          result = Integrations::Sync::SyncExecutionService.new(
+            @config,
+            params[:feature_key],
+            manual: true
+          ).call
+
+          if result.success?
+            present result.data, with: Entities::SyncResultEntity
+          else
+            error!({
+              error: "sync_error",
+              message: result.errors.join(", "),
+              execution_id: result.data&.dig(:execution_id)
+            }, 422)
+          end
+        end
+
+        desc "Sincronizar todas las features habilitadas" do
+          detail "Ejecuta sincronización para cada feature activa en secuencia. " \
+                 "Cada ejecución puede consultarse en /sync_executions"
+        end
+        post "sync-all" do
+          unless @config.is_active
+            error!({
+              error: "inactive_configuration",
+              message: "La configuración debe estar activa para sincronizar"
+            }, 422)
+          end
+
+          if @config.enabled_features.empty?
+            error!({
+              error: "no_features_enabled",
+              message: "No hay features habilitadas para sincronizar",
+              hint: "Habilita features usando PUT /integrations/#{@config.id}/features"
+            }, 422)
+          end
+
+          results = []
+
+          @config.enabled_features.each do |feature_key|
+            result = Integrations::Sync::SyncExecutionService.new(
+              @config,
+              feature_key,
+              manual: true
+            ).call
+
+            results << {
+              feature_key: feature_key,
+              success: result.success?,
+              execution_id: result.data&.dig(:execution_id),
+              message: result.success? ? result.message : result.errors.join(", "),
+              data: result.success? ? result.data : nil
+            }
+          end
+
+          {
+            integration_id: @config.id,
+            provider_name: @config.integration_provider.name,
+            total_features: results.count,
+            successful: results.count { |r| r[:success] },
+            failed: results.count { |r| !r[:success] },
+            results: results,
+            hint: "Consulta el detalle de cada ejecución en GET /sync_executions/:execution_id"
+          }
+        end
+      end
+    end
+  end
+end
+
+
+# app/api/v1/marketplace.rb
+module V1
+  class MarketplaceApi < Grape::API
+    resource :marketplace do
+      desc "Obtener marketplace de integraciones (categorías y proveedores)"
+      params do
+        optional :view, type: String,
+                values: %w[grouped flat category_detail],
+                default: "grouped"
+        optional :category_slug, type: String
+        optional :provider_status, type: String, values: %w[active beta coming_soon]
+        optional :is_premium, type: Boolean
+        optional :search, type: String
+
+        # Opciones de inclusión
+        optional :include_features, type: Boolean, default: true
+        optional :include_auth_info, type: Boolean, default: false
+        optional :include_category, type: Boolean, default: false  # ✅ Añadido
+        optional :include_stats, type: Boolean, default: false
+      end
+      get do
+        result = Integrations::Marketplace::UnifiedMarketplaceService.new(
+          view: params[:view],
+          category_slug: params[:category_slug],
+          provider_status: params[:provider_status],
+          is_premium: params[:is_premium],
+          search: params[:search],
+          include_features: params[:include_features],
+          include_auth_info: params[:include_auth_info],
+          include_category: params[:include_category],
+          include_stats: params[:include_stats]
+        ).call
+
+        if result.success?
+          # ✅ Pasar opciones a las entities
+          entity_options = {
+            include_features: params[:include_features],
+            include_auth_info: params[:include_auth_info],
+            include_category: params[:include_category],
+            include_stats: params[:include_stats]
+          }
+
+          case params[:view]
+          when "grouped"
+            present result.data[:categories],
+                    with: Entities::MarketplaceCategoryEntity,
+                    **entity_options  # ✅ Spread operator para pasar opciones
+
+          when "flat"
+            present result.data[:providers],
+                    with: Entities::MarketplaceProviderEntity,
+                    **entity_options
+
+          when "category_detail"
+            present result.data[:category],
+                    with: Entities::MarketplaceCategoryEntity,
+                    **entity_options
+          end
+        else
+          error!({
+            error: "marketplace_error",
+            message: result.errors.join(", ")
+          }, 500)
+        end
+      end
+
+      desc "Obtener detalle completo de un proveedor específico"
+      params do
+        requires :slug, type: String
+        optional :include_category, type: Boolean, default: true
+        optional :include_features, type: Boolean, default: true
+        optional :include_auth_info, type: Boolean, default: true
+        optional :include_stats, type: Boolean, default: true  # ✅ Añadido
+      end
+      get "providers/:slug" do
+        provider = IntegrationProvider
+          .for_marketplace
+          .includes(:integration_category, :integration_features, :integration_auth_schema)
+          .find_by!(slug: params[:slug])
+
+        # ✅ Pasar todas las opciones
+        present provider,
+                with: Entities::MarketplaceProviderEntity,
+                include_category: params[:include_category],
+                include_features: params[:include_features],
+                include_auth_info: params[:include_auth_info],
+                include_stats: params[:include_stats]
+
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener formulario completo para configurar un proveedor"
+      params do
+        requires :slug, type: String, desc: "Slug del proveedor"
+      end
+      get "providers/:slug/configuration_form" do
+        provider = IntegrationProvider
+          .for_marketplace
+          .includes(:integration_features, :integration_auth_schema)
+          .find_by!(slug: params[:slug])
+
+        unless provider.integration_auth_schema&.is_active
+          error!({
+            error: "configuration_unavailable",
+            message: "Este proveedor no tiene configuración de autenticación disponible"
+          }, 422)
+        end
+
+        present provider, with: Entities::ConfigurationFormEntity
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener lista de empresas/tenants disponibles"
+      params do
+        optional :exclude_configured_for, type: String,
+                 desc: "Excluir tenants que ya tienen este proveedor configurado"
+      end
+      get "available_tenants" do
+        tenants = Tenant.active.order(:name)
+
+        if params[:exclude_configured_for].present?
+          provider = IntegrationProvider.find_by(slug: params[:exclude_configured_for])
+
+          if provider
+            configured_tenant_ids = TenantIntegrationConfiguration
+              .where(integration_provider: provider)
+              .pluck(:tenant_id)
+
+            tenants = tenants.where.not(id: configured_tenant_ids)
+          end
+        end
+
+        present tenants, with: Entities::TenantSummaryEntity
+      end
+
+      desc "Configurar una integración desde el marketplace"
+      params do
+        requires :tenant_id, type: Integer
+        requires :provider_slug, type: String
+        requires :credentials, type: Hash
+        requires :enabled_features, type: Array[String]
+        optional :sync_frequency, type: String, values: %w[daily weekly monthly], default: "daily"
+        optional :sync_hour, type: Integer, values: 0..23, default: 2
+        optional :sync_day_of_week, type: Integer, values: 0..6
+        optional :sync_day_of_month, type: String, values: %w[start end]
+        optional :test_connection_first, type: Boolean, default: false
+        optional :activate_immediately, type: Boolean, default: false
+      end
+      post "setup" do
+        tenant = Tenant.find(params[:tenant_id])
+
+        result = Integrations::Marketplace::SetupIntegrationService.new(
+          tenant,
+          params[:provider_slug],
+          declared(params, include_missing: false).except(:tenant_id, :provider_slug)
+        ).call
+
+        if result.success?
+          present result.data,
+                  with: Entities::TenantIntegrationConfigurationEntity,
+                  include_computed: true,
+                  include_provider: true,
+                  include_features: true
+        else
+          error!({
+            error: "setup_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "tenant_not_found",
+          message: "Empresa/Tenant no encontrada"
+        }, 404)
+      end
+
+      desc "Probar conexión con un proveedor sin crear configuración"
+      params do
+        requires :provider_slug, type: String
+        requires :credentials, type: Hash
+      end
+      post "test_connection" do
+        provider = IntegrationProvider.for_marketplace.find_by!(slug: params[:provider_slug])
+
+        result = Integrations::TenantConfigurations::TestConnectionService.new(
+          provider.id,
+          params[:credentials]
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::ConnectionTestResultEntity
+        else
+          error!({
+            error: "connection_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "provider_not_found",
+          message: "Proveedor no encontrado"
+        }, 404)
+      end
+    end
+  end
+end
+
+# app/api/v1/raw_data_api.rb
+module V1
+  class RawDataApi < Grape::API
+    resource :raw_data do
+      desc "Listar registros de raw data con filtros avanzados"
+      params do
+        optional :tenant_id, type: Integer
+        optional :integration_id, type: Integer
+        optional :feature_key, type: String
+        optional :provider_slug, type: String
+        optional :external_id, type: String
+        optional :status, type: String, values: %w[pending normalized failed duplicate skipped]
+        optional :status_in, type: Array[String]
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+        optional :created_after, type: DateTime
+        optional :created_before, type: DateTime
+        optional :sync_execution_id, type: Integer
+        optional :only_latest_sync, type: Boolean, default: false
+        optional :has_error, type: Boolean
+        optional :error_contains, type: String
+        optional :retriable, type: Boolean
+        optional :sort_by, type: String, values: %w[created_at normalized_at external_id id], default: "created_at"
+        optional :sort_order, type: String, values: %w[asc desc], default: "desc"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50
+        optional :include_raw_data, type: Boolean, default: false
+        optional :include_execution, type: Boolean, default: false
+        optional :include_normalized, type: Boolean, default: false
+        optional :include_metadata, type: Boolean, default: true
+      end
+      get do
+        result = Integrations::RawData::ListService.new(
+          filters: declared(params, include_missing: false)
+        ).call
+
+        if result.success?
+          {
+            raw_data: Entities::IntegrationRawDataEntity.represent(
+              result.data[:raw_data],
+              include_raw_data: params[:include_raw_data],
+              include_execution: params[:include_execution],
+              include_normalized: params[:include_normalized],
+              include_actions: true
+            ),
+            summary: result.data[:summary],
+            pagination: result.data[:pagination]
+          }
+        else
+          error!({ error: "list_failed", message: result.errors.join(", ") }, 500)
+        end
+      end
+
+      desc "Obtener timeline de procesamiento"
+      params do
+        optional :sync_execution_id, type: Integer
+        optional :integration_id, type: Integer
+        optional :from_time, type: DateTime
+        optional :to_time, type: DateTime
+      end
+      get "timeline" do
+        result = Integrations::RawData::TimelineService.new(
+          filters: declared(params, include_missing: false)
+        ).call
+
+        present result.data if result.success?
+      end
+
+      desc "Listar solo registros con errores"
+      params do
+        optional :integration_id, type: Integer
+        optional :feature_key, type: String
+        optional :only_retriable, type: Boolean
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50
+      end
+      get "errors" do
+        filter_params = declared(params, include_missing: false).merge(status: "failed")
+
+        result = Integrations::RawData::ListService.new(filters: filter_params).call
+
+        if result.success?
+          {
+            errors: Entities::IntegrationRawDataEntity.represent(
+              result.data[:raw_data],
+              include_actions: true,
+              error_focus: true
+            ),
+            summary: result.data[:summary],
+            pagination: result.data[:pagination],
+            hint: "Para estadísticas detalladas use GET /sync_executions/statistics"
+          }
+        end
+      end
+
+      desc "Ejecutar acciones en lote"
+      params do
+        requires :action, type: String, values: %w[retry skip reset delete]
+        optional :ids, type: Array[Integer]
+        optional :filters, type: Hash
+        optional :reason, type: String
+        optional :notes, type: String
+        optional :confirm, type: Boolean, default: false
+        optional :max_records, type: Integer, default: 1000
+      end
+      post "bulk-actions" do
+        if params[:action] == "delete" && !params[:confirm]
+          error!({ error: "confirmation_required", message: "Confirme con confirm: true" }, 422)
+        end
+
+        if params[:action] == "skip" && params[:reason].blank?
+          error!({ error: "reason_required", message: "Proporcione un motivo" }, 422)
+        end
+
+        result = Integrations::RawData::BulkActionsService.new(
+          action: params[:action],
+          ids: params[:ids],
+          filters: params[:filters],
+          reason: params[:reason],
+          notes: params[:notes],
+          max_records: params[:max_records]
+        ).call
+
+        if result.success?
+          {
+            success: true,
+            action: params[:action],
+            summary: result.data[:summary],
+            results: result.data[:results],
+            duration_seconds: result.data[:duration_seconds],
+            message: result.data[:message]
+          }
+        else
+          error!({ error: "bulk_action_failed", message: result.errors.join(", ") }, 422)
+        end
+      end
+
+      route_param :id do
+        desc "Obtener detalle completo"
+        params do
+          optional :include_raw_data, type: Boolean, default: true
+          optional :include_execution, type: Boolean, default: true
+          optional :include_normalized, type: Boolean, default: true
+          optional :include_similar, type: Boolean, default: false
+          optional :include_timeline, type: Boolean, default: true
+        end
+        get do
+          result = Integrations::RawData::GetDetailService.new(
+            id: params[:id],
+            options: declared(params, include_missing: false)
+          ).call
+
+          if result.success?
+            present result.data, with: Entities::IntegrationRawDataDetailEntity
+          else
+            error!({ error: "not_found", message: result.errors.join(", ") }, 404)
+          end
+        end
+
+        desc "Reintentar normalización"
+        post "retry" do
+          result = Integrations::RawData::RetryService.new(id: params[:id]).call
+
+          {
+            success: result.success?,
+            raw_data_id: params[:id],
+            previous_status: result.data[:previous_status],
+            new_status: result.data[:new_status],
+            retry_count: result.data[:retry_count],
+            normalized_record: result.data[:normalized_record],
+            processing_time_ms: result.data[:processing_time_ms],
+            message: result.data[:message],
+            error: result.success? ? nil : result.errors.join(", "),
+            next_steps: result.data[:next_steps]
+          }
+        end
+
+        desc "Marcar como omitido"
+        params do
+          requires :reason, type: String
+          optional :notes, type: String
+        end
+        post "skip" do
+          result = Integrations::RawData::SkipService.new(
+            id: params[:id],
+            reason: params[:reason],
+            notes: params[:notes]
+          ).call
+
+          if result.success?
+            {
+              success: true,
+              raw_data_id: params[:id],
+              previous_status: result.data[:previous_status],
+              new_status: "skipped",
+              skip_info: result.data[:skip_info],
+              message: result.data[:message]
+            }
+          else
+            error!({ error: "skip_failed", message: result.errors.join(", ") }, 422)
+          end
+        end
+
+        desc "Resetear a pending"
+        params do
+          optional :notes, type: String
+        end
+        post "reset" do
+          result = Integrations::RawData::ResetService.new(
+            id: params[:id],
+            notes: params[:notes]
+          ).call
+
+          if result.success?
+            {
+              success: true,
+              raw_data_id: params[:id],
+              previous_status: result.data[:previous_status],
+              new_status: "pending",
+              metadata: result.data[:metadata],
+              next_processing: result.data[:next_processing],
+              message: result.data[:message]
+            }
+          else
+            error!({ error: "reset_failed", message: result.errors.join(", ") }, 422)
+          end
+        end
+
+        desc "Eliminar registro"
+        params do
+          requires :reason, type: String
+          optional :confirm, type: Boolean, default: false
+        end
+        delete do
+          unless params[:confirm]
+            error!({ error: "confirmation_required", message: "Confirme con confirm: true" }, 422)
+          end
+
+          result = Integrations::RawData::DeleteService.new(
+            id: params[:id],
+            reason: params[:reason]
+          ).call
+
+          if result.success?
+            {
+              success: true,
+              raw_data_id: params[:id],
+              deleted_at: result.data[:deleted_at],
+              reason: params[:reason],
+              message: "Registro eliminado correctamente"
+            }
+          else
+            error!({ error: "delete_failed", message: result.errors.join(", ") }, 422)
+          end
+        end
+      end
+    end
+  end
+end
+
+# app/api/v1/sync_executions_api.rb
+module V1
+  class SyncExecutionsApi < Grape::API
+    resource :sync_executions do
+      desc "Listar todas las ejecuciones de sincronización" do
+        detail "Retorna ejecuciones con filtros avanzados"
+      end
+      params do
+        optional :tenant_id, type: Integer
+        optional :integration_id, type: Integer
+        optional :feature_key, type: String
+        optional :status, type: String, values: %w[running completed failed]
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50
+      end
+      get do
+        executions = IntegrationSyncExecution.includes(:tenant_integration_configuration)
+
+        # Aplicar filtros
+        if params[:tenant_id]
+          executions = executions.joins(:tenant_integration_configuration)
+            .where(tenant_integration_configurations: { tenant_id: params[:tenant_id] })
+        end
+
+        executions = executions.where(tenant_integration_configuration_id: params[:integration_id]) if params[:integration_id]
+        executions = executions.where(feature_key: params[:feature_key]) if params[:feature_key]
+        executions = executions.where(status: params[:status]) if params[:status]
+
+        if params[:from_date] && params[:to_date]
+          executions = executions.where(started_at: params[:from_date]..params[:to_date])
+        end
+
+        total = executions.count
+        executions = executions.order(started_at: :desc)
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          executions: Entities::IntegrationSyncExecutionSummaryEntity.represent(executions),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Estadísticas globales consolidadas de sincronizaciones"
+      params do
+        optional :tenant_id, type: Integer
+        optional :integration_id, type: Integer
+        optional :feature_key, type: String
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+        optional :group_by, type: String, values: %w[day week month feature]
+      end
+      get "statistics" do
+        result = Integrations::Sync::GlobalStatisticsService.new(
+          tenant_id: params[:tenant_id],
+          integration_id: params[:integration_id],
+          feature_key: params[:feature_key],
+          from_date: params[:from_date] || 30.days.ago,
+          to_date: params[:to_date] || Date.current,
+          group_by: params[:group_by]
+        ).call
+
+        present result.data
+      end
+
+      route_param :execution_id do
+        desc "Obtener detalle de una ejecución"
+        get do
+          execution = IntegrationSyncExecution.find(params[:execution_id])
+          present execution, with: Entities::IntegrationSyncExecutionEntity
+        end
+
+        desc "Reintentar ejecución fallida"
+        post "retry" do
+          execution = IntegrationSyncExecution.find(params[:execution_id])
+
+          unless execution.failed?
+            error!({ error: "Solo se pueden reintentar ejecuciones fallidas" }, 422)
+          end
+
+          result = Integrations::Sync::SyncExecutionService.new(
+            execution.tenant_integration_configuration,
+            execution.feature_key,
+            manual: true
+          ).call
+
+          present result.data, with: Entities::SyncResultEntity
+        end
+
+        desc "Raw data de esta ejecución"
+        params do
+          optional :status, type: String
+          optional :limit, type: Integer, default: 100
+        end
+        get "raw-data" do
+          execution = IntegrationSyncExecution.find(params[:execution_id])
+          raw_data = execution.integration_raw_data
+
+          raw_data = raw_data.where(processing_status: params[:status]) if params[:status]
+          raw_data = raw_data.limit(params[:limit])
+
+          present raw_data, with: Entities::IntegrationRawDataEntity
+        end
+
+        desc "Errores de normalización"
+        get "errors" do
+          execution = IntegrationSyncExecution.find(params[:execution_id])
+          errors = execution.integration_raw_data.failed
+
+          present errors, with: Entities::IntegrationRawDataEntity
+        end
+
+        desc "Reprocesar registros fallidos de esta ejecución"
+        post "reprocess" do
+          execution = IntegrationSyncExecution.find(params[:execution_id])
+
+          result = Integrations::Normalizers::BatchRetryService.new(
+            execution.integration_raw_data.failed,
+            execution.tenant_integration_configuration
+          ).call
+
+          present result.data
+        end
+      end
+    end
+  end
+end
+
+# app/api/v1/tenants.rb
+module V1
+  class TenantsApi < Grape::API
+    helpers do
+      # TODO: Helper para autenticación admin (ajustar según tu sistema)
+      def require_admin!
+        # Implementar lógica de autenticación admin
+        # error!({ error: "unauthorized" }, 401) unless current_user&.admin?
+      end
+    end
+
+    resource :tenants do
+      desc "Listar todos los tenants (clientes)"
+      params do
+        optional :status, type: String, values: %w[active suspended trial], desc: "Filtrar por estado"
+        optional :search, type: String, desc: "Buscar por nombre o email"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50, values: 1..100
+        optional :include_integrations, type: Boolean, default: false
+        optional :include_counts, type: Boolean, default: true
+      end
+      get do
+        # TODO:require_admin! # Descomentar para requerir permisos admin
+
+        tenants = Tenant.all
+
+        tenants = tenants.where(status: params[:status]) if params[:status]
+
+        if params[:search].present?
+          search_term = "%#{params[:search]}%"
+          tenants = tenants.where(
+            "name ILIKE :term OR email ILIKE :term OR slug ILIKE :term",
+            term: search_term
+          )
+        end
+
+         tenants = tenants.order(created_at: :desc)
+
+        total = tenants.count
+        tenants = tenants.offset((params[:page] - 1) * params[:per_page])
+                        .limit(params[:per_page])
+
+        {
+          tenants: Entities::TenantEntity.represent(
+            tenants,
+            include_integrations: params[:include_integrations],
+            include_counts: params[:include_counts],
+            include_computed: true
+          ),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+      desc "Obtener detalle de un tenant"
+      params do
+        requires :id, type: Integer, desc: "ID del tenant"
+        optional :include_integrations, type: Boolean, default: true
+        optional :include_statistics, type: Boolean, default: true
+      end
+      get ":id" do
+        tenant = Tenant.find(params[:id])
+
+        entity_options = {
+          include_integrations: params[:include_integrations],
+          include_counts: true,
+          include_computed: true
+        }
+
+        result = Entities::TenantEntity.represent(tenant, entity_options).as_json
+
+        # Agregar estadísticas si se solicitan
+        if params[:include_statistics]
+          result[:statistics] = {
+            total_vehicles: tenant.vehicles.count,
+            active_vehicles: tenant.vehicles.active.count,
+            total_refuelings: VehicleRefueling.by_tenant(tenant.id).count,
+            total_charges: VehicleElectricCharge.by_tenant(tenant.id).count,
+            last_sync: tenant.tenant_integration_configurations.active.maximum(:last_sync_at)
+          }
+        end
+
+        result
+      end
+      desc "Crear nuevo tenant (cliente)"
+      params do
+        requires :name, type: String, desc: "Nombre del tenant"
+        requires :email, type: String, desc: "Email de contacto"
+        optional :slug, type: String, desc: "Slug único (se genera automáticamente si no se proporciona)"
+        optional :status, type: String, values: %w[active suspended trial], default: "trial"
+        optional :settings, type: Hash, default: {}, desc: "Configuración personalizada"
+      end
+      post do
+        # TODO:require_admin!
+
+        tenant = Tenant.new(declared(params, include_missing: false))
+
+        if tenant.save
+          present tenant,
+                  with: Entities::TenantEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: tenant.errors.full_messages.join(", "),
+            details: tenant.errors.messages
+          }, 422)
+        end
+      end
+      desc "Actualizar tenant"
+      params do
+        requires :id, type: Integer
+        optional :name, type: String
+        optional :email, type: String
+        optional :status, type: String, values: %w[active suspended trial]
+        optional :settings, type: Hash
+      end
+      put ":id" do
+        # TODO:require_admin!
+
+        tenant = Tenant.find(params[:id])
+
+        if tenant.update(declared(params, include_missing: false))
+          present tenant,
+                  with: Entities::TenantEntity,
+                  include_computed: true
+        else
+          error!({
+            error: "validation_error",
+            message: tenant.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+      desc "Eliminar tenant"
+      params do
+        requires :id, type: Integer
+        optional :force, type: Boolean, default: false, desc: "Forzar eliminación incluso con datos"
+      end
+      delete ":id" do
+        # TODO:require_admin!
+
+        tenant = Tenant.find(params[:id])
+
+        if !params[:force] && tenant.has_associated_data?
+          error!({
+            error: "tenant_has_data",
+            message: "El tenant tiene datos asociados. Use force=true para eliminar de todas formas.",
+            data: {
+              vehicles_count: tenant.vehicles.count,
+              configurations_count: tenant.tenant_integration_configurations.count,
+              refuelings_count: VehicleRefueling.by_tenant(tenant.id).count,
+              charges_count: VehicleElectricCharge.by_tenant(tenant.id).count
+            }
+          }, 422)
+        end
+
+        if tenant.destroy
+          { success: true, message: "Tenant eliminado exitosamente" }
+        else
+          error!({
+            error: "deletion_error",
+            message: tenant.errors.full_messages.join(", ")
+          }, 422)
+        end
+      end
+      desc "Activar tenant"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/activate" do
+        # TODO: require_admin!
+
+        tenant = Tenant.find(params[:id])
+        tenant.update!(status: "active")
+
+        present tenant,
+                with: Entities::TenantEntity,
+                include_computed: true
+      end
+      desc "Suspender tenant"
+      params do
+        requires :id, type: Integer
+      end
+      post ":id/suspend" do
+        # TODO: require_admin!
+
+        tenant = Tenant.find(params[:id])
+        tenant.update!(status: "suspended")
+
+        tenant.tenant_integration_configurations.active.update_all(is_active: false)
+
+        present tenant,
+                with: Entities::TenantEntity,
+                include_computed: true
+      end
+      desc "Obtener estadísticas detalladas del tenant"
+      params do
+        requires :id, type: Integer
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+      end
+      get ":id/statistics" do
+        tenant = Tenant.find(params[:id])
+
+        from_date = params[:from_date] || 30.days.ago
+        to_date = params[:to_date] || Date.current
+
+        {
+          tenant_id: tenant.id,
+          tenant_name: tenant.name,
+          period: {
+            from: from_date,
+            to: to_date
+          },
+          vehicles: {
+            total: tenant.vehicles.count,
+            active: tenant.vehicles.active.count,
+            with_telemetry: tenant.vehicles_with_telemetry.count
+          },
+          integrations: {
+            total: tenant.tenant_integration_configurations.count,
+            active: tenant.tenant_integration_configurations.active.count,
+            by_provider: tenant.tenant_integration_configurations
+              .joins(:integration_provider)
+              .group("integration_providers.name")
+              .count
+          },
+          refuelings: {
+            total: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date).count,
+            total_liters: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:volume_liters).to_f.round(2),
+            total_cost: VehicleRefueling.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:cost).to_f.round(2)
+          },
+          electric_charges: {
+            total: VehicleElectricCharge.by_tenant(tenant.id)
+              .between_dates(from_date, to_date).count,
+            total_kwh: VehicleElectricCharge.by_tenant(tenant.id)
+              .between_dates(from_date, to_date)
+              .sum(:energy_consumed_kwh).to_f.round(2)
+          },
+          syncs: {
+            total_executions: IntegrationSyncExecution
+              .joins(:tenant_integration_configuration)
+              .where(tenant_integration_configurations: { tenant_id: tenant.id })
+              .where("started_at BETWEEN ? AND ?", from_date, to_date)
+              .count,
+            successful: IntegrationSyncExecution
+              .joins(:tenant_integration_configuration)
+              .where(tenant_integration_configurations: { tenant_id: tenant.id })
+              .where("started_at BETWEEN ? AND ?", from_date, to_date)
+              .completed.count
+          }
+        }
+      end
+      desc "Estadísticas globales de todos los tenants"
+      get "stats" do
+        # TODO: require_admin!
+
+        {
+          total_tenants: Tenant.count,
+          by_status: Tenant.group(:status).count,
+          active_tenants: Tenant.active.count,
+          total_vehicles: Vehicle.count,
+          total_integrations: TenantIntegrationConfiguration.count,
+          active_integrations: TenantIntegrationConfiguration.active.count,
+          total_refuelings: VehicleRefueling.count,
+          total_charges: VehicleElectricCharge.count,
+          most_active_tenants: Tenant
+            .joins(:tenant_integration_configurations)
+            .group("tenants.id", "tenants.name")
+            .select("tenants.id, tenants.name, COUNT(tenant_integration_configurations.id) as integrations_count")
+            .order("integrations_count DESC")
+            .limit(10)
+            .map { |t| { id: t.id, name: t.name, integrations_count: t.integrations_count } }
+        }
+      end
+    end
+  end
+end
+# app/api/v1/vehicle_electric_charges.rb
+module V1
+  class VehicleElectricChargesApi < Grape::API
+    resource :electric_charges, desc: "Cargas eléctricas de vehículos" do
+      desc "Listar todas las cargas eléctricas" do
+        detail "Retorna cargas eléctricas con filtros opcionales"
+        success Entities::VehicleElectricChargeSummaryEntity
+      end
+      params do
+        optional :vehicle_id, type: Integer, desc: "Filtrar por vehículo"
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+        optional :charge_type, type: String, values: %w[AC DC], desc: "Filtrar por tipo de carga"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 100, values: 1..500
+      end
+      get do
+        charges = VehicleElectricCharge
+          .includes(:vehicle, :tenant)
+          .recent
+
+        charges = charges.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        charges = charges.by_tenant(params[:tenant_id]) if params[:tenant_id]
+        charges = charges.where(charge_type: params[:charge_type]) if params[:charge_type]
+
+        if params[:from_date] && params[:to_date]
+          charges = charges.between_dates(params[:from_date], params[:to_date])
+        end
+
+        total = charges.count
+
+        charges = charges
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          charges: Entities::VehicleElectricChargeSummaryEntity.represent(charges),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Obtener detalle de una carga eléctrica" do
+        success Entities::VehicleElectricChargeEntity
+      end
+      params do
+        requires :id, type: Integer
+      end
+      get ":id" do
+        charge = VehicleElectricCharge.find(params[:id])
+
+        present charge,
+                with: Entities::VehicleElectricChargeEntity,
+                include_computed: true,
+                include_vehicle: true,
+                include_raw_data: true
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Carga eléctrica no encontrada"
+        }, 404)
+      end
+
+      desc "Obtener estadísticas de cargas eléctricas" do
+        detail "Retorna estadísticas agregadas de cargas"
+      end
+      params do
+        optional :vehicle_id, type: Integer
+        optional :tenant_id, type: Integer
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+      end
+      get "statistics" do
+        charges = VehicleElectricCharge.all
+
+        # Aplicar filtros
+        charges = charges.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        charges = charges.by_tenant(params[:tenant_id]) if params[:tenant_id]
+
+        if params[:from_date] && params[:to_date]
+          charges = charges.between_dates(params[:from_date], params[:to_date])
+        end
+
+        {
+          total_charges: charges.count,
+          total_energy_kwh: charges.total_energy,
+          average_energy_kwh: charges.average_energy,
+          total_duration_hours: charges.total_duration_hours,
+          by_charge_type: charges.count_by_charge_type,
+          period: {
+            from: params[:from_date] || charges.minimum(:charge_start_time),
+            to: params[:to_date] || charges.maximum(:charge_start_time)
+          }
+        }
+      end
+    end
+  end
+end
+
+# app/api/v1/vehicle_mappings_api.rb
+module V1
+  class VehicleProviderMappingsApi < Grape::API
+    resource :vehicle_mappings, desc: "Mapeos entre vehículos internos y proveedores de telemetría" do
+      desc "Listar todos los mapeos de vehículos" do
+        detail "Retorna mapeos entre vehículos y proveedores de telemetría"
+        success Entities::VehicleProviderMappingEntity
+      end
+      params do
+        optional :integration_id, type: Integer, desc: "Filtrar por configuración de integración"
+        optional :vehicle_id, type: Integer, desc: "Filtrar por vehículo"
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :active_only, type: Boolean, default: false, desc: "Solo mapeos activos"
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50, values: 1..100
+      end
+      get do
+        mappings = VehicleProviderMapping.includes(:vehicle, :tenant_integration_configuration)
+
+        if params[:integration_id]
+          mappings = mappings.where(tenant_integration_configuration_id: params[:integration_id])
+        end
+
+        mappings = mappings.where(vehicle_id: params[:vehicle_id]) if params[:vehicle_id]
+        mappings = mappings.active if params[:active_only]
+
+        if params[:tenant_id]
+          mappings = mappings
+            .joins(tenant_integration_configuration: :tenant)
+            .where(tenants: { id: params[:tenant_id] })
+        end
+
+        total = mappings.count
+
+        mappings = mappings
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          mappings: Entities::VehicleProviderMappingEntity.represent(mappings),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Crear nuevo mapeo vehículo-proveedor" do
+        detail "Mapea un vehículo interno con un ID de vehículo del proveedor"
+        success Entities::VehicleProviderMappingEntity
+      end
+      params do
+        requires :integration_configuration_id, type: Integer,
+                 desc: "ID de la configuración de integración"
+        requires :vehicle_id, type: Integer, desc: "ID del vehículo interno"
+        requires :external_vehicle_id, type: String, desc: "ID del vehículo en el proveedor"
+        optional :external_vehicle_name, type: String, desc: "Nombre del vehículo en el proveedor"
+        optional :external_metadata, type: Hash, default: {},
+                 desc: "Metadata adicional del proveedor"
+      end
+      post do
+        config = TenantIntegrationConfiguration.find(params[:integration_configuration_id])
+        vehicle = Vehicle.find(params[:vehicle_id])
+
+        unless vehicle.tenant_id == config.tenant_id
+          error!({
+            error: "tenant_mismatch",
+            message: "El vehículo y la configuración deben pertenecer al mismo tenant"
+          }, 422)
+        end
+
+        result = Integrations::VehicleMappings::CreateMappingService.new(
+          config,
+          vehicle,
+          params[:external_vehicle_id],
+          params[:external_vehicle_name]
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::VehicleProviderMappingEntity
+        else
+          error!({
+            error: "validation_error",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound => e
+        error!({
+          error: "not_found",
+          message: e.message
+        }, 404)
+      end
+
+      route_param :id do
+        desc "Obtener detalle de un mapeo" do
+          success Entities::VehicleProviderMappingEntity
+        end
+        get do
+          mapping = VehicleProviderMapping.find(params[:id])
+          present mapping, with: Entities::VehicleProviderMappingEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Mapeo no encontrado"
+          }, 404)
+        end
+
+        desc "Actualizar mapeo" do
+          success Entities::VehicleProviderMappingEntity
+        end
+        params do
+          optional :external_vehicle_name, type: String
+          optional :external_metadata, type: Hash
+        end
+        put do
+          mapping = VehicleProviderMapping.find(params[:id])
+
+          if mapping.update(declared(params, include_missing: false))
+            present mapping, with: Entities::VehicleProviderMappingEntity
+          else
+            error!({
+              error: "validation_error",
+              message: mapping.errors.full_messages.join(", ")
+            }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Mapeo no encontrado"
+          }, 404)
+        end
+
+        desc "Eliminar mapeo" do
+          detail "Elimina permanentemente un mapeo vehículo-proveedor"
+        end
+        delete do
+          mapping = VehicleProviderMapping.find(params[:id])
+
+          if mapping.destroy
+            { success: true, message: "Mapeo eliminado exitosamente" }
+          else
+            error!({
+              error: "deletion_error",
+              message: mapping.errors.full_messages.join(", ")
+            }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Mapeo no encontrado"
+          }, 404)
+        end
+
+        desc "Activar mapeo" do
+          detail "Activa el mapeo para permitir sincronización de datos"
+        end
+        post "activate" do
+          mapping = VehicleProviderMapping.find(params[:id])
+          mapping.activate!
+
+          present mapping, with: Entities::VehicleProviderMappingEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Mapeo no encontrado"
+          }, 404)
+        end
+
+        desc "Desactivar mapeo" do
+          detail "Desactiva el mapeo. No se sincronizarán más datos para este vehículo."
+        end
+        post "deactivate" do
+          mapping = VehicleProviderMapping.find(params[:id])
+          mapping.deactivate!
+
+          present mapping, with: Entities::VehicleProviderMappingEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Mapeo no encontrado"
+          }, 404)
+        end
+      end
+    end
+  end
+end
+
+# app/api/v1/vehicle_refuelings.rb
+module V1
+  class VehicleRefuelingsApi < Grape::API
+    resource :refuelings, desc: "Repostajes de combustible" do
+      desc "Listar todos los repostajes" do
+        detail "Retorna repostajes de combustible con filtros opcionales"
+        success Entities::VehicleRefuelingSummaryEntity
+      end
+      params do
+        optional :vehicle_id, type: Integer, desc: "Filtrar por vehículo"
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+        optional :fuel_type, type: String, desc: "Filtrar por tipo de combustible"
+        optional :limit, type: Integer, default: 100, values: 1..500
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 100, values: 1..500
+      end
+      get do
+        refuelings = VehicleRefueling
+          .includes(:vehicle, :tenant)
+          .recent
+
+        refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
+        refuelings = refuelings.by_fuel_type(params[:fuel_type]) if params[:fuel_type]
+
+        if params[:from_date] && params[:to_date]
+          refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+        end
+
+          total = refuelings.count
+
+        refuelings = refuelings
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          refuelings: Entities::VehicleRefuelingSummaryEntity.represent(refuelings),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Obtener detalle de un repostaje" do
+        success Entities::VehicleRefuelingEntity
+      end
+      params do
+        requires :id, type: Integer
+      end
+      get ":id" do
+        refueling = VehicleRefueling.find(params[:id])
+
+        present refueling,
+                with: Entities::VehicleRefuelingEntity,
+                include_computed: true,
+                include_vehicle: true,
+                include_raw_data: true
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Repostaje no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener estadísticas de repostajes" do
+        detail "Retorna estadísticas agregadas de repostajes"
+      end
+      params do
+        optional :vehicle_id, type: Integer
+        optional :tenant_id, type: Integer
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+      end
+      get "statistics" do
+        refuelings = VehicleRefueling.all
+
+        # Aplicar filtros
+        refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
+
+        if params[:from_date] && params[:to_date]
+          refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+        end
+
+        {
+          total_refuelings: refuelings.count,
+          total_liters: refuelings.total_volume,
+          total_cost: refuelings.total_cost,
+          average_liters_per_refueling: refuelings.average_volume,
+          by_fuel_type: refuelings.count_by_fuel_type,
+          period: {
+            from: params[:from_date] || refuelings.minimum(:refueling_date),
+            to: params[:to_date] || refuelings.maximum(:refueling_date)
+          }
+        }
+      end
+    end
+  end
+end
+# app/api/v1/vehicles_api.rb
+module V1
+  class VehiclesApi < Grape::API
+    resource :vehicles do
+      desc "Listar todos los vehículos" do
+        detail "Retorna lista de vehículos con filtros opcionales"
+        success Entities::VehicleEntity
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :status, type: String, values: %w[active maintenance inactive sold],
+                 desc: "Filtrar por estado"
+        optional :fuel_type, type: String,
+                 values: %w[diesel gasoline electric hybrid lpg cng hydrogen],
+                 desc: "Filtrar por tipo de combustible"
+        optional :vehicle_type, type: String, values: %w[car van truck motorcycle bus],
+                 desc: "Filtrar por tipo de vehículo"
+        optional :is_electric, type: Boolean, desc: "Filtrar eléctricos/combustión"
+        optional :with_telemetry, type: Boolean, default: false,
+                 desc: "Solo vehículos con telemetría activa"
+        optional :brand, type: String, desc: "Filtrar por marca"
+        optional :search, type: String, desc: "Buscar por nombre o matrícula"
+
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 50, values: 1..100
+
+        optional :sort_by, type: String, values: %w[name license_plate created_at],
+                 default: "name", desc: "Campo para ordenar"
+        optional :sort_order, type: String, values: %w[asc desc],
+                 default: "asc", desc: "Dirección del ordenamiento"
+      end
+      get do
+        vehicles = Vehicle.includes(:tenant)
+
+        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+        vehicles = vehicles.where(status: params[:status]) if params[:status]
+        vehicles = vehicles.by_fuel_type(params[:fuel_type]) if params[:fuel_type]
+        vehicles = vehicles.where(vehicle_type: params[:vehicle_type]) if params[:vehicle_type]
+        vehicles = vehicles.where(is_electric: params[:is_electric]) unless params[:is_electric].nil?
+        vehicles = vehicles.by_brand(params[:brand]) if params[:brand]
+        if params[:with_telemetry]
+          vehicles = vehicles
+            .joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct
+        end
+
+        if params[:search].present?
+          search_term = "%#{params[:search]}%"
+          vehicles = vehicles.where(
+            "name ILIKE ? OR license_plate ILIKE ?",
+            search_term, search_term
+          )
+        end
+
+        order_clause = case params[:sort_by]
+        when "created_at"
+                        "created_at #{params[:sort_order]}"
+        when "license_plate"
+                        "license_plate #{params[:sort_order]}"
+        else
+                        "name #{params[:sort_order]}"
+        end
+        vehicles = vehicles.order(Arel.sql(order_clause))
+
+        total = vehicles.count
+
+        vehicles = vehicles
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          vehicles: Entities::VehicleEntity.represent(vehicles),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Crear nuevo vehículo" do
+        detail "Crea un vehículo en el sistema"
+        success Entities::VehicleEntity
+      end
+      params do
+        requires :tenant_id, type: Integer, desc: "ID del tenant propietario"
+        requires :name, type: String, desc: "Nombre descriptivo del vehículo"
+        requires :license_plate, type: String, desc: "Matrícula del vehículo"
+
+        optional :vin, type: String, desc: "VIN (Vehicle Identification Number)"
+        optional :brand, type: String, desc: "Marca (Ford, Mercedes, Tesla, etc.)"
+        optional :model, type: String, desc: "Modelo del vehículo"
+        optional :year, type: Integer, desc: "Año de fabricación"
+        optional :vehicle_type, type: String, values: %w[car van truck motorcycle bus],
+                 desc: "Tipo de vehículo"
+        optional :fuel_type, type: String,
+                 values: %w[diesel gasoline electric hybrid lpg cng hydrogen],
+                 desc: "Tipo de combustible/energía"
+        optional :tank_capacity_liters, type: Float, desc: "Capacidad del tanque (L)"
+        optional :battery_capacity_kwh, type: Float, desc: "Capacidad de batería (kWh)"
+        optional :initial_odometer_km, type: Float, desc: "Kilometraje inicial"
+        optional :acquisition_date, type: Date, desc: "Fecha de adquisición"
+        optional :metadata, type: Hash, default: {}, desc: "Metadata adicional"
+      end
+      post do
+        tenant = Tenant.find(params[:tenant_id])
+
+        vehicle = tenant.vehicles.build(
+          declared(params, include_missing: false).except(:tenant_id)
+        )
+
+        if vehicle.save
+          present vehicle,
+                  with: Entities::VehicleEntity,
+                  include_telemetry: true
+        else
+          error!({
+            error: "validation_error",
+            message: vehicle.errors.full_messages.join(", "),
+            details: vehicle.errors.messages
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Tenant no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener opciones disponibles para crear/editar vehículos" do
+        detail "Retorna listas de valores válidos para los campos"
+      end
+      get "options" do
+        {
+          fuel_types: Vehicle.fuel_types.map { |type|
+            { value: type, label: type.humanize }
+          },
+          vehicle_types: Vehicle.vehicle_types.map { |type|
+            { value: type, label: type.humanize }
+          },
+          statuses: Vehicle.statuses.map { |status|
+            { value: status, label: status.humanize }
+          }
+        }
+      end
+
+      route_param :id do
+        desc "Obtener detalle de un vehículo" do
+          detail "Retorna información completa de un vehículo"
+          success Entities::VehicleEntity
+        end
+        params do
+          optional :include_telemetry, type: Boolean, default: true
+          optional :include_statistics, type: Boolean, default: true
+          optional :include_recent_activity, type: Boolean, default: false
+        end
+        get do
+          vehicle = Vehicle.find(params[:id])
+
+          entity_options = {
+            include_telemetry: params[:include_telemetry],
+            include_statistics: params[:include_statistics]
+          }
+
+          response = Entities::VehicleEntity.represent(vehicle, entity_options).as_json
+
+          if params[:include_recent_activity]
+            response[:recent_activity] = {
+              last_refueling: vehicle.vehicle_refuelings.recent.first&.refueling_date,
+              last_charge: vehicle.vehicle_electric_charges.recent.first&.charge_start_time,
+              refuelings_last_30_days: vehicle.vehicle_refuelings
+                .where("refueling_date >= ?", 30.days.ago).count,
+              charges_last_30_days: vehicle.vehicle_electric_charges
+                .where("charge_start_time >= ?", 30.days.ago).count
+            }
+          end
+
+          response
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Actualizar vehículo" do
+          detail "Actualiza la información de un vehículo"
+          success Entities::VehicleEntity
+        end
+        params do
+          optional :name, type: String
+          optional :license_plate, type: String
+          optional :vin, type: String
+          optional :brand, type: String
+          optional :model, type: String
+          optional :year, type: Integer
+          optional :vehicle_type, type: String, values: %w[car van truck motorcycle bus]
+          optional :fuel_type, type: String,
+                   values: %w[diesel gasoline electric hybrid lpg cng hydrogen]
+          optional :status, type: String, values: %w[active maintenance inactive sold]
+          optional :tank_capacity_liters, type: Float
+          optional :battery_capacity_kwh, type: Float
+          optional :current_odometer_km, type: Float
+          optional :last_maintenance_date, type: Date
+          optional :next_maintenance_date, type: Date
+          optional :metadata, type: Hash
+        end
+        put do
+          vehicle = Vehicle.find(params[:id])
+
+          if vehicle.update(declared(params, include_missing: false))
+            present vehicle,
+                    with: Entities::VehicleEntity,
+                    include_telemetry: true
+          else
+            error!({
+              error: "validation_error",
+              message: vehicle.errors.full_messages.join(", ")
+            }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Eliminar vehículo" do
+          detail "Elimina un vehículo del sistema"
+        end
+        delete do
+          vehicle = Vehicle.find(params[:id])
+
+          if vehicle.destroy
+            { success: true, message: "Vehículo eliminado exitosamente" }
+          else
+            error!({
+              error: "deletion_error",
+              message: vehicle.errors.full_messages.join(", ")
+            }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Activar vehículo" do
+          detail "Cambia el estado del vehículo a 'active'"
+        end
+        post "activate" do
+          vehicle = Vehicle.find(params[:id])
+          vehicle.update!(status: "active")
+
+          present vehicle, with: Entities::VehicleEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Poner vehículo en mantenimiento" do
+          detail "Cambia el estado del vehículo a 'maintenance'"
+        end
+        post "set-maintenance" do
+          vehicle = Vehicle.find(params[:id])
+          vehicle.update!(status: "maintenance")
+
+          present vehicle, with: Entities::VehicleEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Desactivar vehículo" do
+          detail "Cambia el estado del vehículo a 'inactive'"
+        end
+        post "deactivate" do
+          vehicle = Vehicle.find(params[:id])
+          vehicle.update!(status: "inactive")
+
+          present vehicle, with: Entities::VehicleEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Obtener estado de telemetría del vehículo" do
+          detail "Retorna información sobre la telemetría activa"
+        end
+        get "telemetry-status" do
+          vehicle = Vehicle.find(params[:id])
+
+          active_mappings = vehicle.vehicle_provider_mappings.active
+
+          {
+            vehicle_id: vehicle.id,
+            has_telemetry: vehicle.has_telemetry?,
+            active_mappings_count: active_mappings.count,
+            providers: active_mappings.map do |mapping|
+              {
+                provider_id: mapping.integration_provider.id,
+                provider_name: mapping.integration_provider.name,
+                provider_slug: mapping.integration_provider.slug,
+                external_vehicle_id: mapping.external_vehicle_id,
+                external_vehicle_name: mapping.external_vehicle_name,
+                mapped_at: mapping.mapped_at,
+                last_sync_at: mapping.last_sync_at
+              }
+            end
+          }
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Listar repostajes del vehículo" do
+          detail "Retorna el historial de repostajes"
+        end
+        params do
+          optional :from_date, type: Date, desc: "Fecha desde"
+          optional :to_date, type: Date, desc: "Fecha hasta"
+          optional :limit, type: Integer, default: 100, values: 1..500
+        end
+        get "refuelings" do
+          vehicle = Vehicle.find(params[:id])
+
+          refuelings = vehicle.vehicle_refuelings.recent
+
+          # Aplicar filtros de fecha
+          if params[:from_date] && params[:to_date]
+            refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+          end
+
+          refuelings = refuelings.limit(params[:limit])
+
+          present refuelings,
+                  with: Entities::VehicleRefuelingEntity,
+                  include_computed: true
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Listar cargas eléctricas del vehículo" do
+          detail "Retorna el historial de cargas (solo vehículos eléctricos)"
+        end
+        params do
+          optional :from_date, type: Date
+          optional :to_date, type: Date
+          optional :charge_type, type: String, values: %w[AC DC]
+          optional :limit, type: Integer, default: 100, values: 1..500
+        end
+        get "electric-charges" do
+          vehicle = Vehicle.find(params[:id])
+
+          # Verificar que sea eléctrico
+          unless vehicle.electric?
+            error!({
+              error: "invalid_vehicle_type",
+              message: "Este vehículo no es eléctrico",
+              vehicle_fuel_type: vehicle.fuel_type
+            }, 422)
+          end
+
+          charges = vehicle.vehicle_electric_charges.recent
+
+          # Aplicar filtros
+          if params[:from_date] && params[:to_date]
+            charges = charges.between_dates(params[:from_date], params[:to_date])
+          end
+
+          charges = charges.where(charge_type: params[:charge_type]) if params[:charge_type]
+          charges = charges.limit(params[:limit])
+
+          present charges,
+                  with: Entities::VehicleElectricChargeEntity,
+                  include_computed: true
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+
+        desc "Obtener estadísticas del vehículo" do
+          detail "Retorna métricas y estadísticas de uso"
+        end
+        params do
+          optional :from_date, type: Date, desc: "Fecha desde"
+          optional :to_date, type: Date, desc: "Fecha hasta"
+        end
+        get "statistics" do
+          vehicle = Vehicle.find(params[:id])
+
+          from_date = params[:from_date] || 30.days.ago.to_date
+          to_date = params[:to_date] || Date.current
+
+          stats = {
+            vehicle_id: vehicle.id,
+            vehicle_name: vehicle.name,
+            license_plate: vehicle.license_plate,
+            period: {
+              from: from_date,
+              to: to_date,
+              days: (to_date - from_date).to_i + 1
+            }
+          }
+
+          if vehicle.electric?
+            charges = vehicle.vehicle_electric_charges
+              .where("charge_start_time BETWEEN ? AND ?", from_date.beginning_of_day, to_date.end_of_day)
+
+            stats[:electric] = {
+              total_charges: charges.count,
+              total_energy_kwh: charges.sum(:energy_consumed_kwh).to_f.round(2),
+              average_energy_per_charge_kwh: charges.average(:energy_consumed_kwh).to_f.round(2),
+              total_charge_time_minutes: charges.sum(:duration_minutes).to_i,
+              fast_charges_count: charges.where(charge_type: "DC").count,
+              slow_charges_count: charges.where(charge_type: "AC").count
+            }
+          else
+            refuelings = vehicle.vehicle_refuelings
+              .where("refueling_date BETWEEN ? AND ?", from_date.beginning_of_day, to_date.end_of_day)
+
+            stats[:fuel] = {
+              total_refuelings: refuelings.count,
+              total_liters: refuelings.sum(:volume_liters).to_f.round(2),
+              total_cost: refuelings.sum(:cost).to_f.round(2),
+              average_liters_per_refueling: refuelings.average(:volume_liters).to_f.round(2),
+              average_cost_per_liter: (refuelings.sum(:cost) / refuelings.sum(:volume_liters)).to_f.round(2)
+            }
+          end
+
+          if vehicle.current_odometer_km && vehicle.initial_odometer_km
+            stats[:odometer] = {
+              initial_km: vehicle.initial_odometer_km,
+              current_km: vehicle.current_odometer_km,
+              total_km_driven: vehicle.total_km_driven
+            }
+          end
+
+          stats
+        rescue ActiveRecord::RecordNotFound
+          error!({
+            error: "not_found",
+            message: "Vehículo no encontrado"
+          }, 404)
+        end
+      end
+      desc "Obtener resumen de la flota de vehículos" do
+        detail "Retorna estadísticas agregadas de todos los vehículos"
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+      end
+      get "summary" do
+        vehicles = Vehicle.all
+        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+
+        {
+          total_vehicles: vehicles.count,
+          by_status: vehicles.group(:status).count,
+          by_fuel_type: vehicles.group(:fuel_type).count,
+          by_vehicle_type: vehicles.group(:vehicle_type).count,
+          electric_vehicles: vehicles.electric.count,
+          combustion_vehicles: vehicles.combustion.count,
+          with_telemetry: vehicles.joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct.count,
+          needs_maintenance: vehicles.select(&:needs_maintenance?).count
+        }
+      end
+    end
+  end
+end

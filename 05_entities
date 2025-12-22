@@ -1,0 +1,1374 @@
+# app/api/entities/configuration_form_entity.rb
+module Entities
+  class ConfigurationFormEntity < Grape::Entity
+    expose :provider_info do |provider, _options|
+      {
+        id: provider.id,
+        name: provider.name,
+        slug: provider.slug,
+        description: provider.description,
+        logo_url: provider.logo_url,
+        website_url: provider.website_url,
+        is_premium: provider.is_premium
+      }
+    end
+    expose :authentication_fields do |provider, _options|
+      schema = provider.integration_auth_schema
+      next [] unless schema&.is_active
+
+      schema.auth_fields.map do |field|
+        {
+          name: field["name"],
+          type: field["type"], # "text", "password", "url", "select"
+          label: field["label"],
+          placeholder: field["placeholder"],
+          required: field["required"] || false,
+          options: field["options"] || [], # Para campos tipo "select"
+          help_text: field["help_text"] # Texto de ayuda adicional
+        }
+      end
+    end
+    expose :credentials_example do |provider, _options|
+      schema = provider.integration_auth_schema
+      schema&.example_credentials || {}
+    end
+    expose :available_features do |provider, _options|
+      provider.integration_features.active.ordered.map do |feature|
+        {
+          key: feature.feature_key,
+          name: feature.feature_name,
+          description: feature.feature_description,
+          enabled_by_default: false # Todas empiezan deshabilitadas
+        }
+      end
+    end
+    expose :sync_schedule_options do
+      {
+        frequencies: [
+          { value: "daily", label: "Diaria", description: "Se ejecuta todos los días" },
+          { value: "weekly", label: "Semanal", description: "Se ejecuta una vez por semana" },
+          { value: "monthly", label: "Mensual", description: "Se ejecuta una vez al mes" }
+        ],
+        hours: (0..23).map { |h| { value: h, label: "#{h.to_s.rjust(2, '0')}:00" } },
+        days_of_week: [
+          { value: 0, label: "Domingo" },
+          { value: 1, label: "Lunes" },
+          { value: 2, label: "Martes" },
+          { value: 3, label: "Miércoles" },
+          { value: 4, label: "Jueves" },
+          { value: 5, label: "Viernes" },
+          { value: 6, label: "Sábado" }
+        ],
+        days_of_month: [
+          { value: "start", label: "Primer día del mes" },
+          { value: "end", label: "Último día del mes" }
+        ]
+      }
+    end
+    expose :validation_rules do |provider, _options|
+      schema = provider.integration_auth_schema
+      next {} unless schema
+
+      rules = {}
+      schema.auth_fields.each do |field|
+        rules[field["name"]] = {
+          required: field["required"] || false,
+          type: field["type"],
+          min_length: field["min_length"],
+          max_length: field["max_length"],
+          pattern: field["pattern"]
+        }.compact
+      end
+      rules
+    end
+  end
+end
+# app/api/entities/connection_test_result_entity.rb
+module Entities
+  class ConnectionTestResultEntity < Grape::Entity
+    expose :success
+    expose :message
+    expose :provider_name
+    expose :tested_at do |result, _options|
+      Time.current
+    end
+    expose :details, if: ->(result, _options) { result[:details].present? }
+  end
+end
+# app/api/entities/error_entity.rb
+module Entities
+  class ErrorEntity < Grape::Entity
+    expose :error
+    expose :message
+    expose :details, if: { include_details: true }
+    expose :field, if: ->(instance, _options) { instance.key?(:field) }
+  end
+end
+# app/api/entities/integration_auth_schema_entity.rb
+module Entities
+  class IntegrationAuthSchemaEntity < Grape::Entity
+    expose :id
+    expose :integration_provider_id
+    expose :auth_fields
+    expose :example_credentials
+    expose :is_active
+    expose :created_at
+    expose :updated_at
+    expose :integration_provider, using: Entities::IntegrationProviderEntity, if: { include_provider: true }
+    expose :field_names, if: { include_computed: true } do |schema, _options|
+      schema.field_names
+    end
+    expose :required_fields, if: { include_computed: true } do |schema, _options|
+      schema.required_fields
+    end
+    expose :total_fields_count, if: { include_counts: true } do |schema, _options|
+      schema.auth_fields.is_a?(Array) ? schema.auth_fields.count : 0
+    end
+  end
+end
+# app/api/entities/integration_category_entity.rb
+module Entities
+  class IntegrationCategoryEntity < Grape::Entity
+    expose :id
+    expose :name
+    expose :slug
+    expose :description
+    expose :icon
+    expose :display_order
+    expose :is_active
+    expose :created_at
+    expose :updated_at
+    expose :integration_providers, using: Entities::IntegrationProviderEntity, if: { include_providers: true }
+    expose :active_providers_count, if: { include_counts: true } do |category, _options|
+      category.integration_providers.active.count
+    end
+  end
+end
+# app/api/entities/integration_feature_entity.rb
+module Entities
+  class IntegrationFeatureEntity < Grape::Entity
+    expose :id
+    expose :integration_provider_id
+    expose :feature_key
+    expose :feature_name
+    expose :feature_description
+    expose :display_order
+    expose :is_active
+    expose :created_at
+    expose :updated_at
+    expose :integration_provider, using: Entities::IntegrationProviderEntity, if: { include_provider: true }
+    expose :available, if: { include_computed: true } do |feature, _options|
+      feature.available?
+    end
+  end
+end
+# app/api/entities/integration_provider_entity.rb
+module Entities
+  class IntegrationProviderEntity < Grape::Entity
+    expose :id
+    expose :integration_category_id
+    expose :name
+    expose :slug
+    expose :api_base_url
+    expose :description
+    expose :logo_url
+    expose :website_url
+    expose :status
+    expose :is_premium
+    expose :display_order
+    expose :is_active
+    expose :created_at
+    expose :updated_at
+    expose :integration_category, using: Entities::IntegrationCategoryEntity, if: { include_category: true }
+    expose :integration_auth_schema, using: Entities::IntegrationAuthSchemaEntity, if: { include_auth_schema: true }
+    expose :integration_features, using: Entities::IntegrationFeatureEntity, if: { include_features: true }
+    expose :available, if: { include_computed: true } do |provider, _options|
+      provider.available?
+    end
+    expose :ready_for_production, if: { include_computed: true } do |provider, _options|
+      provider.ready_for_production?
+    end
+    expose :active_features_count, if: { include_counts: true } do |provider, _options|
+      provider.integration_features.active.count
+    end
+  end
+end
+# app/api/entities/integration_raw_data_detail_entity.rb
+module Entities
+  class IntegrationRawDataDetailEntity < Grape::Entity
+    # Información básica
+    expose :id
+    expose :integration_sync_execution_id
+    expose :tenant_integration_configuration_id
+
+    expose :provider_slug
+    expose :feature_key
+    expose :external_id
+
+    # Estado y procesamiento
+    expose :processing_status
+    expose :normalization_error
+    expose :normalized_at
+    expose :created_at
+    expose :updated_at
+
+    # Raw data completo
+    expose :raw_data
+
+    # Metadata extendida
+    expose :metadata do |obj|
+      base = obj.metadata || {}
+
+      base.merge({
+        retry_count: obj.retry_count || 0,
+        last_retry_at: obj.last_retry_at,
+        # Llamada corregida indicando la clase:
+        error_type: Entities::IntegrationRawDataDetailEntity.detect_error_type(obj),
+        processing_duration_ms: Entities::IntegrationRawDataDetailEntity.calculate_duration(obj),
+        normalizer_class: "#{obj.provider_slug.classify}::#{obj.feature_key.classify}Normalizer"
+      })
+    end
+
+    # Sync execution completa
+    expose :sync_execution do |obj|
+      next nil unless obj.integration_sync_execution
+
+      exec = obj.integration_sync_execution
+      {
+        id: exec.id,
+        feature_key: exec.feature_key,
+        started_at: exec.started_at,
+        finished_at: exec.finished_at,
+        status: exec.status,
+        records_fetched: exec.records_fetched,
+        records_processed: exec.records_processed,
+        records_failed: exec.records_failed,
+        url: "/api/v1/integrations/#{obj.tenant_integration_configuration_id}/sync-executions/#{exec.id}"
+      }
+    end
+
+    # Configuración
+    expose :configuration do |obj|
+      next nil unless obj.tenant_integration_configuration
+
+      config = obj.tenant_integration_configuration
+      {
+        id: config.id,
+        provider: {
+          name: config.integration_provider.name,
+          slug: config.integration_provider.slug,
+          logo_url: config.integration_provider.logo_url
+        },
+        tenant: {
+          id: config.tenant_id,
+          name: config.tenant.name
+        }
+      }
+    end
+
+    # Normalized record completo
+    expose :normalized_record do |obj|
+      next nil unless obj.normalized_record
+
+      record = obj.normalized_record
+
+      case obj.normalized_record_type
+      when "VehicleRefueling"
+        {
+          type: "VehicleRefueling",
+          id: record.id,
+          vehicle: {
+            id: record.vehicle_id,
+            name: record.vehicle.name,
+            license_plate: record.vehicle.license_plate
+          },
+          refueling_date: record.refueling_date,
+          volume_liters: record.volume_liters,
+          cost: record.cost,
+          odometer_km: record.odometer_km,
+          fuel_type: record.fuel_type,
+          location: record.location_lat ? {
+            lat: record.location_lat,
+            lng: record.location_lng
+          } : nil,
+          url: "/api/v1/refuelings/#{record.id}"
+        }
+
+      when "VehicleElectricCharge"
+        {
+          type: "VehicleElectricCharge",
+          id: record.id,
+          vehicle: {
+            id: record.vehicle_id,
+            name: record.vehicle.name,
+            license_plate: record.vehicle.license_plate
+          },
+          charge_start_time: record.charge_start_time,
+          charge_end_time: record.charge_end_time,
+          energy_kwh: record.energy_consumed_kwh,
+          ## cost: record.cost,
+          url: "/api/v1/electric_charges/#{record.id}"
+        }
+
+      else
+        {
+          type: obj.normalized_record_type,
+          id: obj.normalized_record_id
+        }
+      end
+    end
+
+    # Timeline de eventos
+    expose :timeline do |obj|
+      events = []
+
+      # Creación
+      events << {
+        timestamp: obj.created_at,
+        event: "created",
+        status: "pending",
+        description: "Registro raw creado"
+      }
+
+      # Normalización (éxito o error)
+      if obj.normalized_at
+        events << {
+          timestamp: obj.normalized_at,
+          event: obj.processing_status == "normalized" ? "normalization_success" : "normalization_failed",
+          status: obj.processing_status,
+          description: obj.processing_status == "normalized" ?
+            "Normalización exitosa" :
+            "Normalización fallida: #{obj.normalization_error}",
+          error: obj.normalization_error
+        }
+      end
+
+      # Reintentos
+      if obj.retry_count && obj.retry_count > 0
+        (1..obj.retry_count).each do |attempt|
+          events << {
+            timestamp: obj.last_retry_at, # Simplificado, idealmente guardar cada timestamp
+            event: "retry_attempted",
+            status: obj.processing_status,
+            description: "Reintento #{attempt} - #{obj.processing_status == 'failed' ? 'Fallido' : 'Exitoso'}",
+            error: obj.processing_status == "failed" ? obj.normalization_error : nil
+          }
+        end
+      end
+
+      # Ordenar por timestamp
+      events.sort_by { |e| e[:timestamp] }
+    end
+
+    # Registros similares (mismo error/vehículo)
+    expose :similar_records do |obj, opts|
+      next nil unless opts[:include_similar]
+      next nil unless obj.processing_status == "failed"
+
+      # Buscar registros con el mismo error
+      similar = IntegrationRawData
+        .where(tenant_integration_configuration_id: obj.tenant_integration_configuration_id)
+        .where(processing_status: "failed")
+        .where.not(id: obj.id)
+        .where("normalization_error LIKE ?", "%#{extract_key_error_part(obj.normalization_error)}%")
+        .limit(5)
+
+      {
+        count: similar.count,
+        records: similar.map do |rec|
+          {
+            id: rec.id,
+            external_id: rec.external_id,
+            status: rec.processing_status,
+            error: rec.normalization_error,
+            created_at: rec.created_at
+          }
+        end,
+        suggestion: build_similarity_suggestion(obj, similar)
+      }
+    end
+
+    # Acciones disponibles
+    expose :available_actions do |obj, opts|
+      Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
+    end
+
+    private
+
+    def self.detect_error_type(obj)
+      return nil unless obj.normalization_error.present?
+
+      error_msg = obj.normalization_error.downcase
+
+      case error_msg
+      when /vehicle mapping not found|vehicle not found/
+        "vehicle_not_found"
+      when /authentication|credentials/
+        "authentication_error"
+      when /invalid.*format|missing.*field/
+        "data_quality_issue"
+      when /duplicate/
+        "duplicate_detection"
+      else
+        "normalization_error"
+      end
+    end
+
+    def self.calculate_duration(obj)
+      return nil unless obj.normalized_at && obj.created_at
+      ((obj.normalized_at - obj.created_at) * 1000).round
+    end
+
+    def self.extract_key_error_part(error_message)
+      # Extraer la parte clave del error para buscar similares
+      return "" unless error_message
+
+      # Si contiene "vehicle mapping", extraer el external_id
+      if error_message.include?("mapping not found")
+        match = error_message.match(/external_id[:\s]+([a-zA-Z0-9_-]+)/)
+        return "external_id: #{match[1]}" if match
+      end
+
+      # Si es otro tipo de error, tomar las primeras palabras clave
+      error_message.split(":").first&.strip || error_message[0..50]
+    end
+
+    def self.build_similarity_suggestion(obj, similar_records)
+      return nil if similar_records.empty?
+
+      error_type = detect_error_type(obj)
+
+      case error_type
+      when "vehicle_not_found"
+        external_id = obj.normalization_error.match(/external_id[:\s]+([a-zA-Z0-9_-]+)/)&.send(:[], 1)
+        "Hay #{similar_records.count} registros más con el mismo vehículo no encontrado (#{external_id}). " \
+        "¿Crear mapeo para resolver todos?"
+
+      when "data_quality_issue"
+        "Hay #{similar_records.count} registros más con problemas de calidad similares. " \
+        "Considere verificar el normalizer o la configuración del proveedor."
+
+      else
+        "Hay #{similar_records.count} registros más con errores similares."
+      end
+    end
+  end
+end
+# app/api/entities/integration_raw_data_entity.rb
+module Entities
+  class IntegrationRawDataEntity < Grape::Entity
+    expose :id
+    expose :integration_sync_execution_id
+    expose :tenant_integration_configuration_id
+    expose :provider_slug
+    expose :feature_key
+    expose :external_id
+    expose :raw_data, if: { include_raw_data: true }
+    expose :processing_status
+    expose :normalized_record_type
+    expose :normalized_record_id
+    expose :normalization_error
+    expose :normalized_at
+    expose :created_at
+    expose :integration_sync_execution,
+           using: Entities::IntegrationSyncExecutionSummaryEntity,
+           if: { include_execution: true }
+    expose :is_pending, if: { include_computed: true } do |raw_data, _options|
+      raw_data.pending?
+    end
+    expose :is_normalized, if: { include_computed: true } do |raw_data, _options|
+      raw_data.normalized?
+    end
+    expose :is_failed, if: { include_computed: true } do |raw_data, _options|
+      raw_data.failed?
+    end
+    expose :is_duplicate, if: { include_computed: true } do |raw_data, _options|
+      raw_data.duplicate?
+    end
+    expose :raw_data_preview, unless: { include_raw_data: true } do |raw_data, _options|
+      return nil unless raw_data.raw_data.is_a?(Hash)
+      raw_data.raw_data.first(3).to_h
+    end
+    expose :normalized_record_link, if: { include_computed: true } do |raw_data, _options|
+      next nil unless raw_data.normalized_record_type && raw_data.normalized_record_id
+
+      {
+        type: raw_data.normalized_record_type,
+        id: raw_data.normalized_record_id,
+        path: case raw_data.normalized_record_type
+              when "VehicleRefueling" then "/vehicles/refuelings/#{raw_data.normalized_record_id}"
+              when "VehicleElectricCharge" then "/vehicles/electric_charges/#{raw_data.normalized_record_id}"
+              end
+      }
+    end
+    expose :status_badge do |raw_data, _options|
+      case raw_data.processing_status
+      when "pending" then "info"
+      when "normalized" then "success"
+      when "failed" then "error"
+      when "duplicate" then "warning"
+      else "default"
+      end
+    end
+    expose :available_actions do |obj, opts|
+      Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
+    end
+
+    # Define el método como un método de CLASE (self.)
+    def self.build_available_actions(obj, _opts = {})
+      actions = []
+
+      case obj.processing_status
+      when "failed"
+        actions << { id: "retry", label: "Reintentar", method: "POST", url: "/api/v1/raw_data/#{obj.id}/retry" }
+      when "duplicate"
+        actions << { id: "ignore", label: "Ignorar", method: "POST", url: "/api/v1/raw_data/#{obj.id}/ignore" }
+      end
+
+      # Acciones comunes
+      actions << { id: "view_raw", label: "Ver Raw JSON", method: "GET", url: "/api/v1/raw_data/#{obj.id}" }
+
+      actions
+    end
+  end
+end
+# app/api/entities/integration_sync_execution_entity.rb
+module Entities
+  class IntegrationSyncExecutionEntity < Grape::Entity
+    expose :id
+    expose :tenant_integration_configuration_id
+    expose :feature_key
+    expose :trigger_type
+    expose :status
+    expose :started_at
+    expose :finished_at
+    expose :duration_seconds
+    expose :records_fetched
+    expose :records_processed
+    expose :records_failed
+    expose :records_skipped
+    expose :error_message
+    expose :metadata
+    expose :created_at
+    expose :updated_at
+    expose :provider_info, unless: { include_provider: true } do |execution, _options|
+      {
+        id: execution.integration_provider.id,
+        name: execution.integration_provider.name,
+        slug: execution.integration_provider.slug
+      }
+    end
+    expose :tenant_integration_configuration,
+           using: Entities::TenantIntegrationConfigurationEntity,
+           if: { include_configuration: true }
+    expose :success_rate, if: { include_computed: true } do |execution, _options|
+      execution.success_rate
+    end
+    expose :has_errors, if: { include_computed: true } do |execution, _options|
+      execution.has_errors?
+    end
+    expose :has_duplicates, if: { include_computed: true } do |execution, _options|
+      execution.has_duplicates?
+    end
+    expose :is_running, if: { include_computed: true } do |execution, _options|
+      execution.running?
+    end
+    expose :is_completed, if: { include_computed: true } do |execution, _options|
+      execution.completed?
+    end
+
+    expose :description, if: { include_computed: true } do |execution, _options|
+      execution.description
+    end
+    expose :duration_formatted, if: { include_computed: true } do |execution, _options|
+      next nil unless execution.duration_seconds
+      minutes = execution.duration_seconds / 60
+      seconds = execution.duration_seconds % 60
+      "#{minutes}m #{seconds}s"
+    end
+    expose :status_badge do |execution, _options|
+      case execution.status
+      when "running" then "info"
+      when "completed" then execution.has_errors? ? "warning" : "success"
+      when "failed" then "error"
+      else "default"
+      end
+    end
+  end
+end
+# app/api/entities/integration_sync_execution_summary_entity.rb
+module Entities
+  class IntegrationSyncExecutionSummaryEntity < Grape::Entity
+    expose :id
+    expose :feature_key
+    expose :status
+    expose :started_at
+    expose :duration_seconds
+    expose :records_processed
+    expose :records_failed
+    expose :created_at
+    expose :feature_name do |execution, _options|
+      I18n.t("features.#{execution.feature_key}", default: execution.feature_key.humanize)
+    end
+    expose :stats do |execution, _options|
+      {
+        fetched: execution.records_fetched,
+        processed: execution.records_processed,
+        failed: execution.records_failed,
+        skipped: execution.records_skipped
+      }
+    end
+    expose :status_badge do |execution, _options|
+      case execution.status
+      when "running" then "info"
+      when "completed" then execution.has_errors? ? "warning" : "success"
+      when "failed" then "error"
+      end
+    end
+  end
+end
+# app/api/entities/marketplace_category_entity.rb
+module Entities
+  class MarketplaceCategoryEntity < Grape::Entity
+    expose :id
+    expose :name
+    expose :slug
+    expose :description
+    expose :icon
+    expose :display_order
+    expose :providers do |category, options|
+      providers = category.integration_providers.for_marketplace
+                    .includes(:integration_features, :integration_auth_schema)
+      Entities::MarketplaceProviderEntity.represent(
+        providers,
+        include_category: false,  # Ya están dentro de una categoría
+        include_features: options[:include_features],
+        include_auth_info: options[:include_auth_info],
+        include_stats: options[:include_stats]
+      )
+    end
+    expose :providers_count do |category, _options|
+      category.integration_providers.for_marketplace.count
+    end
+  end
+end
+# app/api/entities/marketplace_feature_entity.rb
+module Entities
+  class MarketplaceFeatureEntity < Grape::Entity
+    expose :feature_key
+    expose :feature_name
+    expose :feature_description
+  end
+end
+# app/api/entities/marketplace_provider_entity.rb
+
+module Entities
+  class MarketplaceProviderEntity < Grape::Entity
+    FEATURE_ICONS = {
+      "fuel" => "local_gas_station",
+      "battery" => "battery_charging_full",
+      "trips" => "route",
+      "real_time_location" => "location_on",
+      "odometer" => "speed",
+      "diagnostics" => "build"
+    }.freeze
+
+    STATUS_LABELS = {
+      "active" => "Disponible",
+      "beta" => "Beta",
+      "coming_soon" => "Próximamente",
+      "deprecated" => "Obsoleto"
+    }.freeze
+
+    STATUS_BADGE_COLORS = {
+      "active" => "success",
+      "beta" => "warning",
+      "coming_soon" => "info",
+      "deprecated" => "error"
+    }.freeze
+
+    expose :id
+    expose :name
+    expose :slug
+    expose :description
+    expose :logo_url
+    expose :website_url
+    expose :status
+    expose :is_premium
+    expose :category, if: ->(provider, options) { options[:include_category] } do |provider, _options|
+      {
+        id: provider.integration_category.id,
+        name: provider.integration_category.name,
+        slug: provider.integration_category.slug,
+        icon: provider.integration_category.icon
+      }
+    end
+    expose :features, if: ->(provider, options) { options[:include_features] } do |provider, _options|
+      provider.integration_features.active.ordered.map do |feature|
+        {
+          key: feature.feature_key,
+          name: feature.feature_name,
+          description: feature.feature_description,
+          icon: FEATURE_ICONS[feature.feature_key] || "check_circle"  # ✅ Uso de constante
+        }
+      end
+    end
+    expose :features_count do |provider, _options|
+      provider.integration_features.active.count
+    end
+    expose :authentication_info, if: ->(provider, options) { options[:include_auth_info] } do |provider, _options|
+      schema = provider.integration_auth_schema
+      next nil unless schema&.is_active
+
+      {
+        has_auth_schema: true,
+        required_fields_count: schema.required_fields.count,
+        field_types: schema.auth_fields.map { |f| f["type"] }.uniq,
+        example_provided: schema.example_credentials.present?,
+        fields_preview: schema.auth_fields.first(3).map do |field|
+          {
+            name: field["name"],
+            type: field["type"],
+            label: field["label"],
+            required: field["required"]
+          }
+        end
+      }
+    end
+    expose :usage_stats, if: ->(provider, options) { options[:include_stats] } do |provider, _options|
+      executions = IntegrationSyncExecution
+        .joins(:tenant_integration_configuration)
+        .where(tenant_integration_configurations: { integration_provider_id: provider.id })
+        .where("started_at >= ?", 30.days.ago)
+
+      total = executions.count
+      success_rate = if total.zero?
+        0
+      else
+        completed = executions.completed.count
+        ((completed.to_f / total) * 100).round(2)
+      end
+
+      {
+        total_configurations: provider.tenant_integration_configurations.count,
+        active_configurations: provider.tenant_integration_configurations.active.count,
+        total_syncs_last_30d: total,
+        success_rate_last_30d: success_rate
+      }
+    end
+    expose :availability do |provider, _options|
+      {
+        is_available: provider.available?,
+        is_production_ready: provider.ready_for_production?,
+        status_label: STATUS_LABELS[provider.status] || "Desconocido",
+        status_badge_color: STATUS_BADGE_COLORS[provider.status] || "default"
+      }
+    end
+  end
+end
+# app/api/entities/raw_data_statistics_entity.rb
+module Entities
+  class RawDataStatisticsEntity < Grape::Entity
+    expose :period do |data|
+      data[:period]
+    end
+
+    expose :totals do |data|
+      data[:totals]
+    end
+
+    expose :rates do |data|
+      data[:rates]
+    end
+
+    expose :by_status do |data|
+      data[:by_status]
+    end
+
+    expose :by_feature do |data|
+      data[:by_feature]
+    end
+
+    expose :by_provider do |data|
+      data[:by_provider]
+    end
+
+    expose :error_breakdown do |data|
+      data[:error_breakdown]
+    end
+
+    expose :trends do |data|
+      data[:trends]
+    end
+
+    expose :health_score do |data|
+      data[:health_score]
+    end
+
+    expose :alerts do |data|
+      data[:alerts]
+    end
+  end
+end
+# app/api/entities/success_entity.rb
+module Entities
+  class SuccessEntity < Grape::Entity
+    expose :success
+    expose :message
+    expose :data, if: ->(instance, _options) { instance.key?(:data) }
+  end
+end
+# app/api/entities/sync_result_entity.rb
+module Entities
+  class SyncResultEntity < Grape::Entity
+    expose :success
+    expose :execution_id
+    expose :feature_key
+    expose :message
+    expose :statistics do |result, _options|
+      {
+        records_fetched: result[:records_fetched] || 0,
+        records_processed: result[:records_processed] || 0,
+        records_failed: result[:records_failed] || 0,
+        records_skipped: result[:records_skipped] || 0
+      }
+    end
+    expose :duration_seconds
+    expose :started_at
+    expose :finished_at
+    expose :errors, if: ->(result, _options) { result[:errors].present? }
+    expose :warnings, if: ->(result, _options) { result[:warnings].present? } do |result, _options|
+      result[:warnings] || []
+    end
+  end
+end
+# app/api/entities/sync_schedule_options_entity.rb
+module Entities
+  class SyncScheduleOptionsEntity < Grape::Entity
+    expose :frequencies do
+      [
+        { value: "daily", label: "Diaria" },
+        { value: "weekly", label: "Semanal" },
+        { value: "monthly", label: "Mensual" }
+      ]
+    end
+    expose :hours do
+      (0..23).map { |h| { value: h, label: "#{h.to_s.rjust(2, '0')}:00" } }
+    end
+    expose :days_of_week do
+      [
+        { value: 0, label: "Domingo" },
+        { value: 1, label: "Lunes" },
+        { value: 2, label: "Martes" },
+        { value: 3, label: "Miércoles" },
+        { value: 4, label: "Jueves" },
+        { value: 5, label: "Viernes" },
+        { value: 6, label: "Sábado" }
+      ]
+    end
+    expose :days_of_month do
+      [
+        { value: "start", label: "Primer día del mes" },
+        { value: "end", label: "Último día del mes" }
+      ]
+    end
+  end
+end
+# app/api/entities/sync_statistics_entity.rb
+module Entities
+  class SyncStatisticsEntity < Grape::Entity
+    expose :total_executions
+    expose :completed_executions
+    expose :failed_executions
+    expose :running_executions
+    expose :total_raw_records
+    expose :pending_records
+    expose :normalized_records
+    expose :failed_records
+    expose :duplicate_records
+    expose :total_refuelings
+    expose :total_electric_charges
+    expose :last_sync_at
+    expose :next_sync_at
+    expose :success_rate do |stats, _options|
+      return 0 if stats[:total_executions].zero?
+      ((stats[:completed_executions].to_f / stats[:total_executions]) * 100).round(2)
+    end
+    expose :executions_by_feature do |stats, _options|
+      stats[:by_feature] || {}
+    end
+    expose :executions_by_status do |stats, _options|
+      stats[:by_status] || {}
+    end
+  end
+end
+# app/api/entities/tenant_entity.rb
+module Entities
+  class TenantEntity < Grape::Entity
+    expose :id
+    expose :name
+    expose :slug
+    expose :email
+    expose :status
+    expose :settings
+    expose :created_at
+    expose :updated_at
+    expose :tenant_integration_configurations,
+           using: Entities::TenantIntegrationConfigurationSummaryEntity,
+           if: { include_integrations: true }
+    expose :is_active, if: { include_computed: true } do |tenant, _options|
+      tenant.active?
+    end
+    expose :is_suspended, if: { include_computed: true } do |tenant, _options|
+      tenant.suspended?
+    end
+    expose :is_trial, if: { include_computed: true } do |tenant, _options|
+      tenant.trial?
+    end
+    expose :vehicles_count, if: { include_counts: true } do |tenant, _options|
+      tenant.vehicles.count
+    end
+    expose :active_vehicles_count, if: { include_counts: true } do |tenant, _options|
+      tenant.vehicles.active.count
+    end
+    expose :integrations_count, if: { include_counts: true } do |tenant, _options|
+      tenant.tenant_integration_configurations.count
+    end
+    expose :active_integrations_count, if: { include_counts: true } do |tenant, _options|
+      tenant.tenant_integration_configurations.active.count
+    end
+    expose :status_badge do |tenant, _options|
+      case tenant.status
+      when "active" then "success"
+      when "trial" then "info"
+      when "suspended" then "warning"
+      else "default"
+      end
+    end
+    expose :contact_info, if: { include_computed: true } do |tenant, _options|
+      {
+        email: tenant.email,
+        name: tenant.name
+      }
+    end
+    expose :last_activity, if: { include_computed: true } do |tenant, _options|
+      last_sync = tenant.tenant_integration_configurations
+        .maximum(:last_sync_at)
+
+      {
+        last_sync_at: last_sync,
+        days_since_last_activity: last_sync ? (Time.current - last_sync).to_i / 86400 : nil
+      }
+    end
+    expose :usage_summary, if: { include_usage: true } do |tenant, _options|
+      {
+        total_refuelings: VehicleRefueling.by_tenant(tenant.id).count,
+        total_charges: VehicleElectricCharge.by_tenant(tenant.id).count,
+        last_refueling_date: VehicleRefueling.by_tenant(tenant.id).maximum(:refueling_date),
+        last_charge_date: VehicleElectricCharge.by_tenant(tenant.id).maximum(:charge_start_time)
+      }
+    end
+    expose :active_providers, if: { include_computed: true } do |tenant, _options|
+      tenant.tenant_integration_configurations.active
+        .includes(:integration_provider)
+        .map do |config|
+          {
+            id: config.integration_provider.id,
+            name: config.integration_provider.name,
+            slug: config.integration_provider.slug,
+            logo_url: config.integration_provider.logo_url
+          }
+        end
+    end
+  end
+end
+# app/api/entities/tenant_integration_configuration_entity.rb
+module Entities
+  class TenantIntegrationConfigurationEntity < Grape::Entity
+    expose :id
+    expose :tenant_id
+    expose :integration_provider_id
+    expose :is_active
+    expose :activated_at
+    expose :sync_frequency
+    expose :sync_hour
+    expose :sync_day_of_week
+    expose :sync_day_of_month
+    expose :enabled_features
+    expose :sync_config
+    expose :last_sync_at
+    expose :last_sync_status
+    expose :last_sync_error
+    expose :metadata
+    expose :created_at
+    expose :updated_at
+    expose :tenant, using: Entities::TenantSummaryEntity, if: { include_tenant: true }
+    expose :integration_provider,
+           using: Entities::IntegrationProviderEntity,
+           if: { include_provider: true }
+    expose :provider_info, unless: { include_provider: true } do |config, _options|
+      {
+        id: config.integration_provider.id,
+        name: config.integration_provider.name,
+        slug: config.integration_provider.slug,
+        logo_url: config.integration_provider.logo_url
+      }
+    end
+    expose :tenant_info, unless: { include_tenant: true } do |config, _options|
+      {
+        id: config.tenant.id,
+        name: config.tenant.name,
+        slug: config.tenant.slug,
+        status: config.tenant.status
+      }
+    end
+    expose :has_credentials, if: { include_computed: true } do |config, _options|
+      config.credentials.present?
+    end
+    expose :has_error, if: { include_computed: true } do |config, _options|
+      config.has_error?
+    end
+    expose :sync_schedule_description, if: { include_computed: true } do |config, _options|
+      config.sync_schedule_description
+    end
+    expose :next_sync_at, if: { include_computed: true } do |config, _options|
+      config.calculate_next_sync_at if config.is_active
+    end
+    expose :available_features, if: { include_features: true } do |config, _options|
+      config.available_features.map do |feature|
+        {
+          feature_key: feature.feature_key,
+          feature_name: feature.feature_name,
+          feature_description: feature.feature_description
+        }
+      end
+    end
+    expose :required_credentials, if: { include_auth_info: true } do |config, _options|
+      schema = config.integration_provider.integration_auth_schema
+      next [] unless schema
+
+      schema.auth_fields.map do |field|
+        {
+          name: field["name"],
+          label: field["label"],
+          type: field["type"],
+          required: field["required"],
+          placeholder: field["placeholder"]
+        }
+      end
+    end
+    expose :status_badge do |config, _options|
+      if config.is_active
+        config.has_error? ? "active_with_errors" : "active"
+      else
+        "inactive"
+      end
+    end
+  end
+end
+# app/api/entities/tenant_integration_configuration_summary_entity.rb
+module Entities
+  class TenantIntegrationConfigurationSummaryEntity < Grape::Entity
+    expose :id
+    expose :tenant_id
+    expose :is_active
+    expose :activated_at
+    expose :sync_frequency
+    expose :sync_hour
+    expose :last_sync_at
+    expose :last_sync_status
+    expose :created_at
+    expose :tenant do |config, _options|
+      {
+        id: config.tenant.id,
+        name: config.tenant.name,
+        slug: config.tenant.slug,
+        status: config.tenant.status
+      }
+    end
+    expose :provider do |config, _options|
+      {
+        id: config.integration_provider.id,
+        name: config.integration_provider.name,
+        slug: config.integration_provider.slug,
+        logo_url: config.integration_provider.logo_url
+      }
+    end
+    expose :enabled_features_count do |config, _options|
+      config.enabled_features.size
+    end
+    expose :status_badge do |config, _options|
+      if config.is_active
+        config.has_error? ? "active_with_errors" : "active"
+      else
+        "inactive"
+      end
+    end
+    expose :sync_schedule do |config, _options|
+      config.sync_schedule_description
+    end
+  end
+end
+# app/api/entities/tenant_summary_entity.rb
+module Entities
+  class TenantSummaryEntity < Grape::Entity
+    expose :id
+    expose :name
+    expose :slug
+    expose :email
+    expose :status
+    expose :created_at
+    expose :status_badge do |tenant, _options|
+      case tenant.status
+      when "active" then "success"
+      when "trial" then "info"
+      when "suspended" then "warning"
+      else "default"
+      end
+    end
+    expose :active_integrations_count do |tenant, _options|
+      tenant.tenant_integration_configurations.active.count
+    end
+    expose :vehicles_count do |tenant, _options|
+      tenant.vehicles.count
+    end
+    expose :last_sync_at do |tenant, _options|
+      tenant.tenant_integration_configurations.maximum(:last_sync_at)
+    end
+  end
+end
+# app/api/entities/vehicle_electric_charge_entity.rb
+module Entities
+  class VehicleElectricChargeEntity < Grape::Entity
+    expose :id
+    expose :tenant_id
+    expose :vehicle_id
+    expose :integration_raw_data_id
+    expose :charge_start_time
+    expose :charge_end_time
+    expose :duration_minutes
+    expose :location_lat
+    expose :location_lng
+    expose :charge_type
+    expose :start_soc_percent
+    expose :end_soc_percent
+    expose :energy_consumed_kwh
+    expose :peak_power_kw
+    expose :odometer_km
+    expose :is_estimated
+    expose :max_ac_voltage
+    expose :provider_metadata, if: { include_metadata: true }
+    expose :created_at
+    expose :updated_at
+    expose :vehicle, using: Entities::VehicleEntity, if: { include_vehicle: true }
+    expose :integration_raw_data,
+           using: Entities::IntegrationRawDataEntity,
+           if: { include_raw_data: true }
+    expose :soc_gained, if: { include_computed: true } do |charge, _options|
+      charge.soc_gained
+    end
+    expose :duration_hours, if: { include_computed: true } do |charge, _options|
+      charge.duration_hours
+    end
+    expose :average_power_kw, if: { include_computed: true } do |charge, _options|
+      charge.average_power_kw
+    end
+    expose :has_location, if: { include_computed: true } do |charge, _options|
+      charge.has_location?
+    end
+    expose :from_integration, if: { include_computed: true } do |charge, _options|
+      charge.from_integration?
+    end
+    expose :is_fast_charge, if: { include_computed: true } do |charge, _options|
+      charge.is_fast_charge?
+    end
+    expose :is_complete_charge, if: { include_computed: true } do |charge, _options|
+      charge.is_complete_charge?
+    end
+    expose :coordinates, if: { include_computed: true } do |charge, _options|
+      charge.coordinates
+    end
+    expose :description, if: { include_computed: true } do |charge, _options|
+      charge.description
+    end
+    expose :vehicle_info, unless: { include_vehicle: true } do |charge, _options|
+      {
+        id: charge.vehicle.id,
+        name: charge.vehicle.name,
+        license_plate: charge.vehicle.license_plate
+      }
+    end
+    expose :data_source_badge do |charge, _options|
+      charge.from_integration? ? "integration" : "manual"
+    end
+    expose :charge_type_badge do |charge, _options|
+      charge.is_fast_charge? ? "fast" : "slow"
+    end
+    expose :estimation_badge do |charge, _options|
+      charge.is_estimated ? "estimated" : "measured"
+    end
+  end
+end
+# app/api/entities/vehicle_electric_charge_summary_entity.rb
+module Entities
+  class VehicleElectricChargeSummaryEntity < Grape::Entity
+    expose :id
+    expose :charge_start_time
+    expose :duration_minutes
+    expose :charge_type
+    expose :start_soc_percent
+    expose :end_soc_percent
+    expose :energy_consumed_kwh
+    expose :is_estimated
+    expose :vehicle_info do |charge, _options|
+      {
+        id: charge.vehicle.id,
+        name: charge.vehicle.name,
+        license_plate: charge.vehicle.license_plate
+      }
+    end
+    expose :soc_gained do |charge, _options|
+      charge.soc_gained
+    end
+    expose :duration_hours do |charge, _options|
+      charge.duration_hours
+    end
+    expose :from_integration do |charge, _options|
+      charge.from_integration?
+    end
+    expose :is_complete do |charge, _options|
+      charge.is_complete_charge?
+    end
+  end
+end
+# app/api/entities/vehicle_entity.rb
+module Entities
+  class VehicleEntity < Grape::Entity
+    expose :id
+    expose :name
+    expose :license_plate
+    expose :brand
+    expose :model
+    expose :fuel_type
+    expose :is_electric
+  end
+end
+# app/api/entities/vehicle_provider_mapping_entity.rb
+module Entities
+  class VehicleProviderMappingEntity < Grape::Entity
+    expose :id
+    expose :vehicle_id
+    expose :tenant_integration_configuration_id
+    expose :external_vehicle_id
+    expose :external_vehicle_name
+    expose :is_active
+    expose :mapped_at
+    expose :last_sync_at
+    expose :external_metadata
+    expose :created_at
+    expose :updated_at
+    expose :vehicle_info do |mapping, _options|
+      {
+        id: mapping.vehicle.id,
+        name: mapping.vehicle.name,
+        license_plate: mapping.vehicle.license_plate,
+        brand: mapping.vehicle.brand,
+        model: mapping.vehicle.model
+      }
+    end
+    expose :provider_info do |mapping, _options|
+      {
+        id: mapping.integration_provider.id,
+        name: mapping.integration_provider.name,
+        slug: mapping.integration_provider.slug
+      }
+    end
+    expose :description do |mapping, _options|
+      mapping.description
+    end
+  end
+end
+# app/api/entities/vehicle_refueling_entity.rb
+module Entities
+  class VehicleRefuelingEntity < Grape::Entity
+    expose :id
+    expose :tenant_id
+    expose :vehicle_id
+    expose :integration_raw_data_id
+    expose :refueling_date
+    expose :location_lat
+    expose :location_lng
+    expose :volume_liters
+    expose :cost
+    expose :currency
+    expose :odometer_km
+    expose :fuel_type
+    expose :confidence_level
+    expose :is_estimated
+    expose :tank_capacity_liters
+    expose :provider_metadata, if: { include_metadata: true }
+    expose :created_at
+    expose :updated_at
+    expose :vehicle, using: Entities::VehicleEntity, if: { include_vehicle: true }
+    expose :integration_raw_data,
+           using: Entities::IntegrationRawDataEntity,
+           if: { include_raw_data: true }
+    expose :cost_per_liter, if: { include_computed: true } do |refueling, _options|
+      refueling.cost_per_liter
+    end
+    expose :has_location, if: { include_computed: true } do |refueling, _options|
+      refueling.has_location?
+    end
+    expose :has_cost, if: { include_computed: true } do |refueling, _options|
+      refueling.has_cost?
+    end
+    expose :from_integration, if: { include_computed: true } do |refueling, _options|
+      refueling.from_integration?
+    end
+    expose :coordinates, if: { include_computed: true } do |refueling, _options|
+      refueling.coordinates
+    end
+    expose :description, if: { include_computed: true } do |refueling, _options|
+      refueling.description
+    end
+    expose :vehicle_info, unless: { include_vehicle: true } do |refueling, _options|
+      {
+        id: refueling.vehicle.id,
+        name: refueling.vehicle.name,
+        license_plate: refueling.vehicle.license_plate
+      }
+    end
+    expose :data_source_badge do |refueling, _options|
+      refueling.from_integration? ? "integration" : "manual"
+    end
+    expose :estimation_badge do |refueling, _options|
+      refueling.is_estimated ? "estimated" : "measured"
+    end
+  end
+end
+# app/api/entities/vehicle_refueling_summary_entity.rb
+module Entities
+  class VehicleRefuelingSummaryEntity < Grape::Entity
+    expose :id
+    expose :refueling_date
+    expose :volume_liters
+    expose :cost
+    expose :currency
+    expose :odometer_km
+    expose :fuel_type
+    expose :is_estimated
+    expose :vehicle_info do |refueling, _options|
+      {
+        id: refueling.vehicle.id,
+        name: refueling.vehicle.name,
+        license_plate: refueling.vehicle.license_plate
+      }
+    end
+    expose :cost_per_liter do |refueling, _options|
+      refueling.cost_per_liter
+    end
+    expose :from_integration do |refueling, _options|
+      refueling.from_integration?
+    end
+  end
+end

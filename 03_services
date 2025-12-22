@@ -1,0 +1,3612 @@
+# app/services/integrations/connectors/base_connector.rb
+module Integrations
+  module Connectors
+    class BaseConnector
+      REQUEST_TIMEOUT = 30.seconds
+
+      attr_reader :config
+
+      def initialize(config)
+        @config = config
+      end
+
+      def fetch_data(feature_key, from_date, to_date)
+        # PASO 1: Asegurar autenticación válida
+        ensure_authenticated!
+
+        # PASO 2: Llamar al método específico según la feature
+        case feature_key
+        when "fuel"
+          fetch_refuelings(from_date, to_date)
+        when "battery"
+          fetch_electric_charges(from_date, to_date)
+        when "trips"
+          fetch_trips(from_date, to_date)
+        else
+          raise ArgumentError, "Feature no soportada: #{feature_key}"
+        end
+      rescue AuthenticationError => e
+        # Si falla autenticación, limpiar estado y re-lanzar
+        Rails.logger.error("Authentication failed: #{e.message}")
+        clear_authentication_state
+        raise
+      rescue StandardError => e
+        Rails.logger.error("Error fetching data: #{e.class} - #{e.message}")
+        raise ApiError, "Error obteniendo datos: #{e.message}"
+      end
+
+      # Proceso de autenticación específico del proveedor
+      def authenticate
+        raise NotImplementedError, "#{self.class} debe implementar #authenticate"
+      end
+
+      # Verificar si hay autenticación válida
+      def authenticated?
+        raise NotImplementedError, "#{self.class} debe implementar #authenticated?"
+      end
+
+      # Headers de autenticación para requests HTTP
+      def auth_headers
+        {}
+      end
+
+      # Obtener repostajes en el rango de fechas
+      def fetch_refuelings(from_date, to_date)
+        raise NotImplementedError, "#{self.class} debe implementar #fetch_refuelings"
+      end
+
+      # Obtener cargas eléctricas en el rango de fechas
+      def fetch_electric_charges(from_date, to_date)
+        raise NotImplementedError, "#{self.class} debe implementar #fetch_electric_charges"
+      end
+
+      # Obtener viajes en el rango de fechas
+      def fetch_trips(from_date, to_date)
+        raise NotImplementedError, "#{self.class} debe implementar #fetch_trips"
+      end
+
+      protected
+
+      # Asegura que hay autenticación válida antes de hacer requests
+      def ensure_authenticated!
+        return if authenticated?
+
+        Rails.logger.info("→ Autenticación requerida para #{self.class.name}")
+        authenticate
+
+        unless authenticated?
+          raise AuthenticationError, "Falló la autenticación"
+        end
+      end
+
+      # Limpiar estado de autenticación (útil cuando expira)
+      def clear_authentication_state
+        # Las subclases pueden sobrescribir esto para limpiar su estado
+        Rails.logger.info("Clearing authentication state")
+      end
+
+      # Acceso rápido a las credenciales
+      def credentials
+        @config.credentials
+      end
+
+      # Realizar petición POST
+      def http_post(url, body, headers = {})
+        uri = URI.parse(url)
+        http = build_http_client(uri)
+
+        request = Net::HTTP::Post.new(uri.path, default_headers.merge(headers))
+        request.body = body.to_json
+
+        log_request(:POST, url, body)
+
+        response = http.request(request)
+
+        log_response(response)
+
+        parse_response(response)
+      end
+
+      # Realizar petición GET
+      def http_get(url, headers = {})
+        uri = URI.parse(url)
+        http = build_http_client(uri)
+
+        request = Net::HTTP::Get.new(uri.request_uri, default_headers.merge(headers))
+
+        log_request(:GET, url, nil)
+
+        response = http.request(request)
+
+        log_response(response)
+
+        parse_response(response)
+      end
+
+      private
+
+      # Construir cliente HTTP con configuración común
+      def build_http_client(uri)
+        http = Net::HTTP.new(uri.host, uri.port)
+        http.use_ssl = (uri.scheme == "https")
+        http.read_timeout = REQUEST_TIMEOUT
+        http.open_timeout = REQUEST_TIMEOUT
+        http
+      end
+
+      def default_headers
+        {
+          "Content-Type" => "application/json",
+          "Accept" => "application/json",
+          "User-Agent" => "FleetManager/1.0"
+        }
+      end
+
+      # Parsear respuesta HTTP
+      def parse_response(response)
+        case response.code.to_i
+        when 200..299
+          # Respuesta exitosa
+          JSON.parse(response.body)
+        when 401, 403
+          # Error de autenticación
+          raise AuthenticationError, "Error de autenticación: #{response.body}"
+        when 429
+          # Rate limit
+          raise RateLimitError, "Límite de peticiones excedido"
+        when 500..599
+          # Error del servidor
+          raise ServerError, "Error del servidor (#{response.code}): #{response.body}"
+        else
+          # Otro error
+          raise ApiError, "Error HTTP #{response.code}: #{response.body}"
+        end
+      rescue JSON::ParserError => e
+        raise ApiError, "Respuesta no es JSON válido: #{e.message}"
+      end
+
+      # Logging de requests
+      def log_request(method, url, body)
+        Rails.logger.debug("→ #{self.class.name} #{method} #{url}")
+        if body && body.is_a?(Hash)
+          # Ocultar contraseñas en logs
+          safe_body = body.deep_dup
+          safe_body.dig("params", "password")&.replace("******") if safe_body.dig("params", "password")
+          Rails.logger.debug("  Body: #{safe_body.to_json[0..200]}...")
+        end
+      end
+
+      # Logging de responses
+      def log_response(response)
+        Rails.logger.debug("← Response: #{response.code}")
+        Rails.logger.debug("  Body: #{response.body[0..200]}...")
+      end
+
+      class ApiError < StandardError; end
+      class AuthenticationError < ApiError; end
+      class RateLimitError < ApiError; end
+      class ServerError < ApiError; end
+    end
+  end
+end
+
+# app/services/integrations/connectors/geotab_connector.rb
+module Integrations
+  module Connectors
+    class GeotabConnector < BaseConnector
+      API_BASE_URL = "https://my.geotab.com/apiv1"
+      SESSION_TTL = 2.hours
+
+      def initialize(config)
+        super(config)
+
+        @session_id = nil
+        @database = nil
+        @user_name = nil
+      end
+
+      def authenticate
+        Rails.logger.info("→ Autenticando con Geotab...")
+
+        payload = {
+          method: "Authenticate",
+          params: {
+            userName: credentials["username"],
+            password: credentials["password"],
+            database: credentials["database"]
+          }
+        }
+
+        begin
+          response = http_post(API_BASE_URL, payload)
+
+          # Validar respuesta
+          unless response["result"]&.dig("credentials")
+            Rails.logger.error("✗ Respuesta de autenticación inválida")
+            raise AuthenticationError, "Respuesta de autenticación inválida"
+          end
+
+          # Extraer datos de sesión
+          credentials_data = response["result"]["credentials"]
+
+          @session_id = credentials_data["sessionId"]
+          @database = credentials_data["database"]
+          @user_name = credentials_data["userName"]
+
+          # Guardar en cache
+          cache_session
+
+          Rails.logger.info("✓ Geotab autenticado exitosamente")
+          Rails.logger.info("  Database: #{@database}")
+          Rails.logger.info("  User: #{@user_name}")
+          Rails.logger.info("  Session: #{@session_id[0..10]}...")
+
+          true
+
+        rescue AuthenticationError
+          raise
+        rescue StandardError => e
+          Rails.logger.error("✗ Error en autenticación Geotab: #{e.message}")
+          raise AuthenticationError, "Error de conexión: #{e.message}"
+        end
+      end
+
+      def authenticated?
+        # Si ya tenemos sessionId en memoria, estamos autenticados
+        return true if @session_id.present?
+
+        # Intentar cargar desde cache
+        load_from_cache
+      end
+
+      def auth_headers
+        {}
+      end
+
+      def fetch_refuelings(from_date, to_date)
+        Rails.logger.info("→ Obteniendo repostajes de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
+
+        payload = build_get_payload(
+          type_name: "FillUp",
+          from_date: from_date,
+          to_date: to_date
+        )
+
+        response = http_post(API_BASE_URL, payload)
+        handle_geotab_response(response, "FillUp")
+      end
+
+      def fetch_electric_charges(from_date, to_date)
+        Rails.logger.info("→ Obteniendo cargas eléctricas de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
+
+        payload = build_get_payload(
+          type_name: "ChargeEvent",
+          from_date: from_date,
+          to_date: to_date
+        )
+
+        response = http_post(API_BASE_URL, payload)
+        handle_geotab_response(response, "ChargeEvent")
+      end
+
+      def fetch_trips(from_date, to_date)
+        Rails.logger.info("→ Obteniendo viajes de Geotab...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
+
+        payload = build_get_payload(
+          type_name: "Trip",
+          from_date: from_date,
+          to_date: to_date
+        )
+
+        response = http_post(API_BASE_URL, payload)
+        handle_geotab_response(response, "Trip")
+      end
+
+      protected
+
+      def clear_authentication_state
+        @session_id = nil
+        @database = nil
+        @user_name = nil
+        Rails.cache.delete(cache_key)
+
+        Rails.logger.info("✓ Estado de autenticación limpiado")
+      end
+
+      private
+
+      # Construir payload estándar para método Get de Geotab
+      # Todos los requests de datos siguen esta estructura
+      def build_get_payload(type_name:, from_date:, to_date:, additional_search: {})
+        {
+          method: "Get",
+          params: {
+            typeName: type_name,
+            search: {
+              FromDate: format_geotab_date(from_date),
+              ToDate: format_geotab_date(to_date)
+            }.merge(additional_search),
+            credentials: build_credentials
+          },
+          id: generate_request_id,
+          jsonrpc: "2.0"
+        }
+      end
+
+      # Construir objeto credentials para requests
+      # TODOS los requests a Geotab (excepto Authenticate) requieren esto
+      def build_credentials
+        {
+          database: @database,
+          userName: @user_name,
+          sessionId: @session_id
+        }
+      end
+
+      def cache_key
+        "geotab_session_#{@config.id}"
+      end
+
+      def cache_session
+        session_data = {
+          session_id: @session_id,
+          database: @database,
+          user_name: @user_name
+        }
+
+        Rails.cache.write(
+          cache_key,
+          session_data,
+          expires_in: SESSION_TTL
+        )
+
+        Rails.logger.debug("✓ Sesión cacheada (TTL: #{SESSION_TTL / 60} min)")
+      end
+
+      def load_from_cache
+        cached = Rails.cache.read(cache_key)
+        return false unless cached.is_a?(Hash)
+
+        cached = cached.with_indifferent_access
+
+        @session_id = cached[:session_id]
+        @database = cached[:database]
+        @user_name = cached[:user_name]
+
+        return false if @session_id.blank? || @database.blank?
+
+        Rails.logger.debug("✓ Sesión cargada desde cache")
+        true
+      rescue => e
+        Rails.logger.warn("⚠ Error al cargar cache: #{e.message}")
+        false
+      end
+
+      def handle_geotab_response(response, entity_type)
+        # Caso 1: Error de Geotab
+        if response["error"]
+          error_msg = response["error"]["message"]
+
+          # Si es error de autenticación, limpiar estado y re-lanzar
+          if error_msg.match?(/invalid credentials|session|unauthorized/i)
+            Rails.logger.warn("⚠ Sesión inválida, limpiando estado...")
+            clear_authentication_state
+            raise AuthenticationError, "Sesión expirada: #{error_msg}"
+          end
+
+          # Otro tipo de error
+          raise ApiError, "Geotab error: #{error_msg}"
+        end
+
+        # Caso 2: Respuesta exitosa
+        result = response["result"] || []
+
+        Rails.logger.info("✓ #{result.count} registros de #{entity_type} obtenidos")
+
+        result
+      end
+
+      # Formatear fecha al formato ISO 8601 con milisegundos
+      # Geotab requiere: "2025-01-15T10:30:00.000Z"
+      def format_geotab_date(date)
+        date = Time.zone.parse(date.to_s) unless date.is_a?(Time)
+        date.utc.iso8601(3)
+      end
+
+      def generate_request_id
+        SecureRandom.uuid
+      end
+    end
+  end
+end
+
+# app/services/integrations/factories/connector_factory.rb
+module Integrations
+  module Factories
+    class ConnectorFactory
+      def self.build(provider_slug, config)
+        unless config.is_a?(TenantIntegrationConfiguration)
+          raise ArgumentError, "config debe ser TenantIntegrationConfiguration"
+        end
+
+        # Validar que config esté activa
+        unless config.is_active
+          raise ArgumentError, "La configuración no está activa"
+        end
+
+        # Construir conector según el proveedor
+        case provider_slug.to_s.downcase
+        when "geotab"
+          Connectors::GeotabConnector.new(config)
+
+        when "verizon_connect"
+          # TODO: Implementar en el futuro
+          Connectors::VerizonConnector.new(config)
+
+        when "tomtom_telematics"
+          # TODO: Implementar en el futuro
+          Connectors::TomtomConnector.new(config)
+
+        when "samsara"
+          # TODO: Implementar en el futuro
+          Connectors::SamsaraConnector.new(config)
+
+        else
+          # Proveedor no soportado
+          raise ArgumentError,
+                "Conector no implementado para proveedor: '#{provider_slug}'. " \
+                "Proveedores disponibles: #{available_providers.join(', ')}"
+        end
+
+      rescue NameError => e
+        # Si la clase del conector no existe
+        Rails.logger.error("Error al construir conector: #{e.message}")
+        raise ArgumentError,
+              "Conector para '#{provider_slug}' no está implementado aún"
+      end
+
+      # Lista de proveedores que tienen conector implementado
+      def self.available_providers
+        [
+          "geotab"
+          # "verizon_connect",
+          # "tomtom_telematics",
+          # "samsara"
+        ]
+      end
+
+      # Verificar si un proveedor tiene conector implementado
+      def self.provider_available?(provider_slug)
+        available_providers.include?(provider_slug.to_s.downcase)
+      end
+
+      # Obtener información sobre proveedores disponibles
+      def self.providers_info
+        {
+          geotab: {
+            name: "Geotab",
+            auth_type: "session",
+            features: [ "fuel", "battery", "trips" ],
+            implemented: true
+          },
+          verizon_connect: {
+            name: "Verizon Connect",
+            auth_type: "token",
+            features: [ "fuel", "trips" ],
+            implemented: false
+          },
+          tomtom_telematics: {
+            name: "TomTom Webfleet",
+            auth_type: "basic_auth",
+            features: [ "fuel", "trips" ],
+            implemented: false
+          },
+          samsara: {
+            name: "Samsara",
+            auth_type: "oauth2",
+            features: [ "fuel", "battery", "trips" ],
+            implemented: false
+          }
+        }
+      end
+    end
+  end
+end
+# app/services/integrations/factories/normalizer_factory.rb
+module Integrations
+  module Factories
+    class NormalizerFactory
+      def self.build(provider_slug, feature_key)
+        case provider_slug
+        when "geotab"
+          build_geotab_normalizer(feature_key)
+        when "verizon_connect"
+          build_verizon_normalizer(feature_key)
+        when "tomtom_telematics"
+          build_tomtom_normalizer(feature_key)
+        else
+          raise ArgumentError, "Normalizador no implementado para: #{provider_slug}"
+        end
+      end
+
+      private
+
+      def self.build_geotab_normalizer(feature_key)
+        case feature_key
+        when "fuel"
+          Normalizers::Geotab::RefuelingNormalizer.new
+        when "battery"
+          Normalizers::Geotab::ElectricChargeNormalizer.new
+        when "trips"
+          Normalizers::Geotab::TripNormalizer.new
+        else
+          raise ArgumentError, "Feature no soportada para Geotab: #{feature_key}"
+        end
+      end
+
+      def self.build_verizon_normalizer(feature_key)
+        # TODO: Implementar normalizadores de Verizon
+        raise NotImplementedError, "Normalizadores de Verizon pendientes"
+      end
+
+      def self.build_tomtom_normalizer(feature_key)
+        # TODO: Implementar normalizadores de TomTom
+        raise NotImplementedError, "Normalizadores de TomTom pendientes"
+      end
+    end
+  end
+end
+# app/services/integrations/marketplace/setup_integration_service.rb
+module Integrations
+  module Marketplace
+    class SetupIntegrationService
+      def initialize(tenant, provider_slug, params)
+        @tenant = tenant
+        @provider_slug = provider_slug
+        @params = params
+      end
+
+      def call
+        # PASO 1: Validar proveedor
+        provider = validate_provider
+        return provider unless provider.is_a?(IntegrationProvider)
+
+        # PASO 2: Validar que el tenant no tenga ya este proveedor
+        existing = check_existing_configuration(provider)
+        return existing if existing.failure?
+
+        # PASO 3: Validar estructura de credenciales
+        validation = validate_credentials_structure(provider)
+        return validation if validation.failure?
+
+        # PASO 4: (OPCIONAL) Probar conexión si se solicita
+        if @params[:test_connection_first]
+          connection_test = test_connection_before_create(provider)
+          return connection_test if connection_test.failure?
+        end
+
+        # PASO 5: Crear configuración (inactiva)
+        config = create_configuration(provider)
+        return config if config.failure?
+
+        # PASO 6: (OPCIONAL) Activar inmediatamente si se solicita
+        if @params[:activate_immediately]
+          activation = activate_configuration(config.data)
+          return activation if activation.failure?
+        end
+
+        # PASO 7: Retornar resultado exitoso
+        ServiceResult.success(
+          data: config.data,
+          message: build_success_message(config.data)
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error en SetupIntegrationService: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al configurar integración: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_provider
+        provider = IntegrationProvider.for_marketplace.find_by(slug: @provider_slug)
+
+        unless provider
+          return ServiceResult.failure(
+            errors: [ "Proveedor '#{@provider_slug}' no encontrado o no disponible" ]
+          )
+        end
+
+        unless provider.integration_auth_schema&.is_active
+          return ServiceResult.failure(
+            errors: [ "El proveedor no tiene configuración de autenticación disponible" ]
+          )
+        end
+
+        provider
+      end
+
+      def check_existing_configuration(provider)
+        existing = @tenant.tenant_integration_configurations.find_by(
+          integration_provider: provider
+        )
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "Ya existe una configuración para este proveedor" ],
+            data: { existing_configuration_id: existing.id }
+          )
+        end
+
+        ServiceResult.success
+      end
+
+      def validate_credentials_structure(provider)
+        credentials = @params[:credentials]
+
+        unless credentials.is_a?(Hash) && credentials.present?
+          return ServiceResult.failure(
+            errors: [ "Las credenciales son requeridas" ]
+          )
+        end
+
+        schema = provider.integration_auth_schema
+        required_fields = schema.required_fields.map { |f| f["name"] }
+        provided_fields = credentials.keys.map(&:to_s)
+
+        missing_fields = required_fields - provided_fields
+
+        if missing_fields.any?
+          return ServiceResult.failure(
+            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+
+
+      def test_connection_before_create(provider)
+        Rails.logger.info("→ Probando conexión antes de crear configuración...")
+
+        result = TenantConfigurations::TestConnectionService.new(
+          provider.id,
+          @params[:credentials]
+        ).call
+
+        unless result.success?
+          return ServiceResult.failure(
+            errors: [ "Test de conexión falló: #{result.errors.join(', ')}" ]
+          )
+        end
+
+        Rails.logger.info("✓ Test de conexión exitoso")
+        ServiceResult.success
+      end
+
+      def create_configuration(provider)
+        config = @tenant.tenant_integration_configurations.build(
+          integration_provider: provider,
+          credentials: @params[:credentials],
+          enabled_features: @params[:enabled_features] || [],
+          sync_frequency: @params[:sync_frequency] || "daily",
+          sync_hour: @params[:sync_hour] || 2,
+          sync_day_of_week: @params[:sync_day_of_week],
+          sync_day_of_month: @params[:sync_day_of_month],
+          sync_config: @params[:sync_config] || {},
+          is_active: false # Siempre empieza inactiva
+        )
+
+        if config.save
+          Rails.logger.info("✓ Configuración creada (ID: #{config.id})")
+          ServiceResult.success(data: config)
+        else
+          ServiceResult.failure(
+            errors: config.errors.full_messages
+          )
+        end
+      end
+
+      def activate_configuration(config)
+        # Validar que tenga al menos una feature habilitada
+        unless config.enabled_features.any?
+          return ServiceResult.failure(
+            errors: [ "Debe seleccionar al menos una funcionalidad antes de activar" ]
+          )
+        end
+
+        if config.update(is_active: true, activated_at: Time.current)
+          Rails.logger.info("✓ Configuración activada")
+          ServiceResult.success(data: config)
+        else
+          ServiceResult.failure(
+            errors: config.errors.full_messages
+          )
+        end
+      end
+
+       def build_success_message(config)
+        base = "Integración con #{config.integration_provider.name} configurada exitosamente"
+
+        if config.is_active
+          "#{base} y activada"
+        else
+          "#{base}. Recuerda activarla para comenzar a sincronizar"
+        end
+      end
+    end
+  end
+end
+
+# app/services/integrations/marketplace/unified_marketplace_service.rb
+module Integrations
+  module Marketplace
+    class UnifiedMarketplaceService
+      def initialize(filters = {})
+        @view = filters[:view] || "grouped"
+        @category_slug = filters[:category_slug]
+        @provider_status = filters[:provider_status]
+        @is_premium = filters[:is_premium]
+        @search = filters[:search]
+        @include_features = filters[:include_features]
+        @include_auth_info = filters[:include_auth_info]
+        @include_category = filters[:include_category]
+        @include_stats = filters[:include_stats]
+      end
+
+      def call
+        case @view
+        when "grouped"
+          get_grouped_marketplace
+        when "flat"
+          get_flat_marketplace
+        when "category_detail"
+          get_category_detail
+        else
+          ServiceResult.failure(errors: [ "Vista no válida: #{@view}" ])
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error en UnifiedMarketplaceService: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al cargar el marketplace: #{e.message}" ])
+      end
+
+      private
+
+      def get_grouped_marketplace
+        categories = IntegrationCategory.active.ordered
+
+        categories = categories.where(slug: @category_slug) if @category_slug.present?
+        categories = apply_search_to_categories(categories) if @search.present?
+
+        includes_array = [ :integration_providers ]
+        includes_array << { integration_providers: :integration_features } if @include_features
+        includes_array << { integration_providers: :integration_auth_schema } if @include_auth_info
+
+        categories = categories.includes(includes_array)
+
+        categories_data = categories.map do |category|
+          providers = filter_providers(category.integration_providers.for_marketplace)
+          next if providers.empty?
+
+          {
+            category: category,
+            providers: providers
+          }
+        end.compact
+
+        ServiceResult.success(
+          data: {
+            categories: categories_data.map { |c| c[:category] },
+            total_categories: categories_data.count,
+            total_providers: categories_data.sum { |c| c[:providers].count }
+          }
+        )
+      end
+
+      def get_flat_marketplace
+        # Obtener todos los proveedores activos
+        providers = IntegrationProvider.for_marketplace
+
+        # Filtrar por categoría
+        if @category_slug.present?
+          category = IntegrationCategory.find_by(slug: @category_slug)
+          providers = providers.where(integration_category: category) if category
+        end
+
+        # Aplicar filtros
+        providers = filter_providers(providers)
+
+        # Aplicar búsqueda
+        providers = apply_search_to_providers(providers) if @search.present?
+
+        # Precargar relaciones
+        providers = providers.includes(
+          :integration_category,
+          :integration_features,
+          :integration_auth_schema
+        )
+
+        ServiceResult.success(
+          data: {
+            providers: providers,
+            total_providers: providers.count,
+            filters_applied: active_filters
+          }
+        )
+      end
+
+      def get_category_detail
+        unless @category_slug.present?
+          return ServiceResult.failure(
+            errors: [ "Se requiere 'category_slug' para la vista category_detail" ]
+          )
+        end
+
+        category = IntegrationCategory
+          .active
+          .includes(integration_providers: [ :integration_features, :integration_auth_schema ])
+          .find_by(slug: @category_slug)
+
+        unless category
+          return ServiceResult.failure(
+            errors: [ "Categoría '#{@category_slug}' no encontrada" ]
+          )
+        end
+
+        # Filtrar proveedores
+        providers = filter_providers(category.integration_providers.for_marketplace)
+
+        ServiceResult.success(
+          data: {
+            category: category,
+            providers: providers,
+            providers_count: providers.count
+          }
+        )
+      end
+
+      def filter_providers(providers)
+        # Filtrar por estado
+        if @provider_status.present?
+          providers = providers.where(status: @provider_status)
+        end
+
+        # Filtrar por premium
+        unless @is_premium.nil?
+          providers = providers.where(is_premium: @is_premium)
+        end
+
+        providers
+      end
+
+      def apply_search_to_providers(providers)
+        search_term = "%#{@search}%"
+        providers.where(
+          "integration_providers.name ILIKE :term OR integration_providers.description ILIKE :term",
+          term: search_term
+        )
+      end
+
+      def apply_search_to_categories(categories)
+        search_term = "%#{@search}%"
+        categories.where(
+          "integration_categories.name ILIKE :term OR integration_categories.description ILIKE :term",
+          term: search_term
+        )
+      end
+
+      def active_filters
+        {
+          view: @view,
+          category_slug: @category_slug,
+          provider_status: @provider_status,
+          is_premium: @is_premium,
+          search: @search
+        }.compact
+      end
+    end
+  end
+end
+
+# app/services/integrations/normalizers/geotab/electric_charge_normalizer.rb
+module Integrations
+  module Normalizers
+    module Geotab
+      class ElectricChargeNormalizer < BaseNormalizer
+        REQUIRED_FIELDS = %w[startTime duration device.id].freeze
+
+        def normalize(raw_data, config)
+          validate_required_fields(raw_data, REQUIRED_FIELDS)
+
+          data = extract_charge_data(raw_data, config)
+          charge = create_charge_record(data, raw_data, config)
+
+          ServiceResult.success(data: charge)
+        rescue StandardError => e
+          ServiceResult.failure(errors: [ e.message ])
+        end
+
+        private
+
+        def extract_charge_data(raw_data, config)
+          external_vehicle_id = extract_field(raw_data, "device.id")
+          vehicle = map_vehicle(external_vehicle_id, config)
+
+          start_time = parse_date(extract_field(raw_data, "startTime"))
+          duration_str = extract_field(raw_data, "duration") # "03:28:33.258"
+          duration_minutes = parse_duration_to_minutes(duration_str)
+
+          {
+            vehicle: vehicle,
+            charge_start_time: start_time,
+            charge_end_time: start_time + duration_minutes.minutes,
+            duration_minutes: duration_minutes,
+            location_lat: extract_field(raw_data, "location.y"),
+            location_lng: extract_field(raw_data, "location.x"),
+            charge_type: extract_field(raw_data, "chargeType"),
+            start_soc_percent: extract_field(raw_data, "startStateOfCharge")&.to_f,
+            end_soc_percent: extract_field(raw_data, "endStateOfCharge")&.to_f,
+            energy_consumed_kwh: extract_field(raw_data, "energyConsumedKwh")&.to_f,
+            peak_power_kw: extract_field(raw_data, "peakPowerKw")&.to_f,
+            odometer_km: convert_to_km(extract_field(raw_data, "chargingStartedOdometerKm")),
+            is_estimated: extract_field(raw_data, "chargeIsEstimated") || false,
+            max_ac_voltage: extract_field(raw_data, "maxACVoltage")&.to_i,
+            provider_metadata: build_metadata(raw_data)
+          }
+        end
+
+        def create_charge_record(data, raw_data, config)
+          VehicleElectricCharge.create!(
+            tenant: config.tenant,
+            vehicle: data[:vehicle],
+            integration_raw_data: raw_data,
+            charge_start_time: data[:charge_start_time],
+            charge_end_time: data[:charge_end_time],
+            duration_minutes: data[:duration_minutes],
+            location_lat: data[:location_lat],
+            location_lng: data[:location_lng],
+            charge_type: data[:charge_type],
+            start_soc_percent: data[:start_soc_percent],
+            end_soc_percent: data[:end_soc_percent],
+            energy_consumed_kwh: data[:energy_consumed_kwh],
+            peak_power_kw: data[:peak_power_kw],
+            odometer_km: data[:odometer_km],
+            is_estimated: data[:is_estimated],
+            max_ac_voltage: data[:max_ac_voltage],
+            provider_metadata: data[:provider_metadata]
+          )
+        end
+
+        def parse_duration_to_minutes(duration_str)
+          # "03:28:33.258" → 208 minutos
+          return nil if duration_str.blank?
+
+          parts = duration_str.split(":")
+          hours = parts[0].to_i
+          minutes = parts[1].to_i
+
+          (hours * 60) + minutes
+        end
+
+        def convert_to_km(value)
+          value&.to_f
+        end
+
+        def build_metadata(raw_data)
+          {
+            measured_onboard_charger_energy_in: extract_field(raw_data, "measuredOnBoardChargerEnergyInKwh"),
+            measured_battery_energy_in: extract_field(raw_data, "measuredBatteryEnergyInKwh"),
+            version: extract_field(raw_data, "version")
+          }.compact
+        end
+      end
+    end
+  end
+end
+# app/services/integrations/normalizers/geotab/refueling_normalizer.rb
+module Integrations
+  module Normalizers
+    module Geotab
+      class RefuelingNormalizer < BaseNormalizer
+        # Campos requeridos en el JSON de Geotab
+        REQUIRED_FIELDS = %w[dateTime volume device.id].freeze
+
+        def normalize(raw_data, config)
+          # PASO 1: Validar campos requeridos
+          validate_required_fields(raw_data, REQUIRED_FIELDS)
+
+          # PASO 2: Extraer datos del JSON RAW
+          data = extract_refueling_data(raw_data, config)
+
+          # PASO 3: Crear registro en VehicleRefueling
+          refueling = create_refueling_record(data, raw_data, config)
+
+          ServiceResult.success(
+            data: refueling,
+            message: "Repostaje normalizado exitosamente"
+          )
+
+        rescue StandardError => e
+          ServiceResult.failure(errors: [ e.message ])
+        end
+
+        private
+
+        def extract_refueling_data(raw_data, config)
+          # Extraer external_vehicle_id
+          external_vehicle_id = extract_field(raw_data, "device.id")
+
+          # Mapear a vehicle de nuestra BD
+          vehicle = map_vehicle(external_vehicle_id, config)
+
+          # Extraer campos del JSON
+          {
+            vehicle: vehicle,
+            refueling_date: parse_date(extract_field(raw_data, "dateTime")),
+            volume_liters: extract_field(raw_data, "volume")&.to_f,
+            cost: extract_field(raw_data, "cost")&.to_f,
+            currency: extract_field(raw_data, "currencyCode")&.strip,
+            odometer_km: convert_to_km(extract_field(raw_data, "odometer")),
+            location_lat: extract_field(raw_data, "location.y"),
+            location_lng: extract_field(raw_data, "location.x"),
+            fuel_type: extract_field(raw_data, "productType") || "Unknown",
+            confidence_level: extract_field(raw_data, "confidence"),
+            is_estimated: false, # Geotab marca FillUp como medido
+            tank_capacity_liters: extract_tank_capacity(raw_data),
+            provider_metadata: build_metadata(raw_data)
+          }
+        end
+
+        def create_refueling_record(data, raw_data, config)
+          VehicleRefueling.create!(
+            tenant: config.tenant,
+            vehicle: data[:vehicle],
+            integration_raw_data: raw_data,
+            refueling_date: data[:refueling_date],
+            volume_liters: data[:volume_liters],
+            cost: data[:cost],
+            currency: data[:currency],
+            odometer_km: data[:odometer_km],
+            location_lat: data[:location_lat],
+            location_lng: data[:location_lng],
+            fuel_type: data[:fuel_type],
+            confidence_level: data[:confidence_level],
+            is_estimated: data[:is_estimated],
+            tank_capacity_liters: data[:tank_capacity_liters],
+            provider_metadata: data[:provider_metadata]
+          )
+        end
+        def convert_to_km(odometer_value)
+          return nil if odometer_value.nil?
+          # Geotab devuelve odómetro en metros, convertir a km
+          (odometer_value.to_f / 1000).round(2)
+        end
+
+        def extract_tank_capacity(raw_data)
+          capacity = extract_field(raw_data, "tankCapacity.volume")
+          capacity&.to_f
+        end
+
+        def build_metadata(raw_data)
+          {
+            distance: extract_field(raw_data, "distance"),
+            total_fuel_used: extract_field(raw_data, "totalFuelUsed"),
+            derived_volume: extract_field(raw_data, "derivedVolume"),
+            version: extract_field(raw_data, "version")
+          }.compact
+        end
+      end
+    end
+  end
+end
+# app/services/integrations/normalizers/base_normalizer.rb
+module Integrations
+  module Normalizers
+    class BaseNormalizer
+      def normalize(raw_data, config)
+        raise NotImplementedError, "Subclases deben implementar #normalize"
+      end
+
+      protected
+
+      # Mapear external_vehicle_id a vehicle_id de nuestra BD
+      def map_vehicle(external_vehicle_id, config)
+        mapping = VehicleProviderMapping.find_by(
+          tenant_integration_configuration: config,
+          external_vehicle_id: external_vehicle_id,
+          is_active: true
+        )
+
+        unless mapping
+          raise "Vehicle mapping not found for external_id: #{external_vehicle_id}"
+        end
+
+        mapping.vehicle
+      end
+
+      # Extraer valor de un campo del raw_data
+      def extract_field(raw_data, field_path)
+        # Soporta paths anidados: 'device.id', 'location.x'
+        fields = field_path.split(".")
+        value = raw_data.raw_data
+
+        fields.each do |field|
+          value = value[field] || value[field.to_sym]
+          return nil if value.nil?
+        end
+
+        value
+      end
+
+      # Parsear fecha del proveedor
+      def parse_date(date_string)
+        return nil if date_string.blank?
+        Time.zone.parse(date_string)
+      rescue ArgumentError => e
+        Rails.logger.warn("Error al parsear fecha '#{date_string}': #{e.message}")
+        nil
+      end
+
+      # Validar que campos requeridos existan
+      def validate_required_fields(raw_data, required_fields)
+        missing = required_fields.select { |field| extract_field(raw_data, field).nil? }
+
+        if missing.any?
+          raise "Campos requeridos faltantes: #{missing.join(', ')}"
+        end
+      end
+    end
+  end
+end
+# app/services/integrations/normalizers/batch_retry_service.rb
+module Integrations
+  module Normalizers
+    class BatchRetryService
+      def initialize(raw_data_records, config)
+        @records = raw_data_records
+        @config = config
+      end
+
+      def call
+        stats = {
+          total: @records.count,
+          processed: 0,
+          failed: 0,
+          errors: []
+        }
+
+        @records.each do |raw_data|
+          result = RetryNormalizationService.new(raw_data, @config).call
+
+          if result.success?
+            stats[:processed] += 1
+          else
+            stats[:failed] += 1
+            stats[:errors] << {
+              raw_data_id: raw_data.id,
+              external_id: raw_data.external_id,
+              error: result.errors.join(", ")
+            }
+          end
+        end
+
+        ServiceResult.success(data: stats)
+      rescue StandardError => e
+        ServiceResult.failure(errors: [ e.message ])
+      end
+    end
+  end
+end
+# app/services/integrations/normalizers/normalize_data_service.rb (CORREGIDO)
+module Integrations
+  module Normalizers
+    class NormalizeDataService
+      def initialize(execution, config)
+        @execution = execution
+        @config = config
+        @feature_key = execution.feature_key
+      end
+
+      def call
+        # PASO 1: Obtener registros RAW pendientes
+        pending_records = @execution.integration_raw_data.pending
+
+        if pending_records.empty?
+          return ServiceResult.success(
+            data: { processed: 0, failed: 0, skipped: 0 },
+            message: "No hay registros pendientes de normalizar"
+          )
+        end
+
+        Rails.logger.info("→ Normalizando #{pending_records.count} registros...")
+
+        # PASO 2: Obtener el normalizador apropiado
+        normalizer = get_normalizer
+
+        # PASO 3: Procesar cada registro
+        stats = process_records(pending_records, normalizer)
+
+        # PASO 4: Retornar resultado
+        ServiceResult.success(
+          data: stats,
+          message: "#{stats[:processed]} registros normalizados, #{stats[:failed]} fallidos"
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error en NormalizeDataService: #{e.message}")
+        Rails.logger.error(e.backtrace.join("\n"))
+
+        # Retornar stats parciales incluso si hubo error
+        ServiceResult.success(
+          data: {
+            processed: 0,
+            failed: pending_records.count,
+            skipped: 0,
+            error: e.message
+          },
+          message: "Error general en normalización: #{e.message}"
+        )
+      end
+
+      private
+
+      def get_normalizer
+        Factories::NormalizerFactory.build(
+          @config.integration_provider.slug,
+          @feature_key
+        )
+      end
+
+      def process_records(pending_records, normalizer)
+        processed = 0
+        failed = 0
+        skipped = 0
+
+        pending_records.each do |raw_data|
+          begin
+            # Normalizar el registro
+            result = normalizer.normalize(raw_data, @config)
+
+            if result.success?
+              raw_data.mark_as_normalized!(result.data)
+              processed += 1
+              Rails.logger.debug("  ✓ Normalizado: #{raw_data.external_id}")
+            else
+              # Fallo en normalización
+              error_message = result.errors.join(", ")
+              raw_data.mark_as_failed!(error_message)
+              failed += 1
+              Rails.logger.warn("  ✗ Falló: #{raw_data.external_id} - #{error_message}")
+            end
+
+          rescue StandardError => e
+            # Error inesperado: marcar como fallido y continuar
+            Rails.logger.error("  ✗ Error inesperado: #{raw_data.external_id}")
+            Rails.logger.error("     #{e.class.name}: #{e.message}")
+
+            begin
+              raw_data.mark_as_failed!("Error inesperado: #{e.message}", error_type: "unexpected_error")
+              failed += 1
+            rescue => marking_error
+              # Si ni siquiera podemos marcar como fallido, loguear y continuar
+              Rails.logger.error("  ✗✗ No se pudo marcar error: #{marking_error.message}")
+              skipped += 1
+            end
+          end
+        end
+
+        Rails.logger.info("✓ Normalización completada:")
+        Rails.logger.info("  - Procesados: #{processed}")
+        Rails.logger.info("  - Fallidos: #{failed}")
+        Rails.logger.info("  - Omitidos: #{skipped}")
+
+        {
+          processed: processed,
+          failed: failed,
+          skipped: skipped
+        }
+      end
+    end
+  end
+end
+# app/services/integrations/normalizers/retry_normalization_service.rb
+module Integrations
+  module Normalizers
+    class RetryNormalizationService
+      def initialize(raw_data, config)
+        @raw_data = raw_data
+        @config = config
+      end
+
+      def call
+        unless @raw_data.can_be_normalized?
+          return ServiceResult.failure(
+            errors: [ "Registro no puede normalizarse (estado: #{@raw_data.processing_status})" ]
+          )
+        end
+
+        # Obtener normalizer
+        normalizer = Factories::NormalizerFactory.build(
+          @raw_data.provider_slug,
+          @raw_data.feature_key
+        )
+
+        # Intentar normalizar
+        result = normalizer.normalize(@raw_data, @config)
+
+        if result.success?
+          @raw_data.mark_as_normalized!(result.data)
+          ServiceResult.success(data: result.data)
+        else
+          @raw_data.mark_as_failed!(result.errors.join(", "))
+          ServiceResult.failure(errors: result.errors)
+        end
+
+      rescue StandardError => e
+        @raw_data.mark_as_failed!("Error inesperado: #{e.message}")
+        ServiceResult.failure(errors: [ e.message ])
+      end
+    end
+  end
+end
+# app/services/integrations/raw_data/bulk_actions_service.rb
+module Integrations
+  module RawData
+    class BulkActionsService
+      MAX_RECORDS = 1000
+
+      def initialize(action:, ids: nil, filters: nil, reason: nil, notes: nil, max_records: 1000)
+        @action = action
+        @ids = ids
+        @filters = filters
+        @reason = reason
+        @notes = notes
+        @max_records = [ max_records, MAX_RECORDS ].min
+      end
+
+      def call
+        start_time = Time.current
+
+        # Obtener registros a procesar
+        records = select_records
+
+        if records.empty?
+          return ServiceResult.failure(errors: [ "No se encontraron registros para procesar" ])
+        end
+
+        if records.count > @max_records
+          return ServiceResult.failure(
+            errors: [ "Demasiados registros seleccionados (#{records.count}). Máximo: #{@max_records}" ]
+          )
+        end
+
+        # Ejecutar acción en cada registro
+        results = process_records(records)
+
+        duration = (Time.current - start_time).round(2)
+
+        summary = {
+          total_selected: records.count,
+          successful: results.count { |r| r[:success] },
+          failed: results.count { |r| !r[:success] },
+          skipped: 0
+        }
+
+        ServiceResult.success(
+          data: {
+            summary: summary,
+            results: results,
+            duration_seconds: duration,
+            message: build_message(summary)
+          }
+        )
+      rescue => e
+        ServiceResult.failure(errors: [ "Error en bulk action: #{e.message}" ])
+      end
+
+      private
+
+      def select_records
+        if @ids.present?
+          # Selección por IDs
+          IntegrationRawData.where(id: @ids)
+        elsif @filters.present?
+          # Selección por filtros
+          build_filtered_query
+        else
+          IntegrationRawData.none
+        end
+      end
+
+      def build_filtered_query
+        query = IntegrationRawData.all
+
+        # Aplicar filtros similares a ListService
+        query = query.where(tenant_integration_configuration_id: @filters[:integration_id]) if @filters[:integration_id]
+        query = query.where(processing_status: @filters[:status]) if @filters[:status]
+        query = query.where(feature_key: @filters[:feature_key]) if @filters[:feature_key]
+
+        if @filters[:error_contains]
+          query = query.where("normalization_error LIKE ?", "%#{@filters[:error_contains]}%")
+        end
+
+        if @filters[:external_id]
+          query = query.where(external_id: @filters[:external_id])
+        end
+
+        if @filters[:created_before]
+          query = query.where("created_at < ?", @filters[:created_before])
+        end
+
+        if @filters[:created_after]
+          query = query.where("created_at > ?", @filters[:created_after])
+        end
+
+        query.limit(@max_records)
+      end
+
+      def process_records(records)
+        results = []
+
+        records.find_each do |record|
+          result = process_single_record(record)
+          results << result
+        end
+
+        results
+      end
+
+      def process_single_record(record)
+        case @action
+        when "retry"
+          retry_record(record)
+        when "skip"
+          skip_record(record)
+        when "reset"
+          reset_record(record)
+        when "delete"
+          delete_record(record)
+        else
+          { id: record.id, success: false, error: "Acción desconocida: #{@action}" }
+        end
+      end
+
+      def retry_record(record)
+        service = RetryService.new(id: record.id)
+        result = service.call
+
+        {
+          id: record.id,
+          success: result.success?,
+          new_status: result.success? ? "normalized" : "failed",
+          normalized_record_id: result.data[:normalized_record]&.dig(:id),
+          error: result.success? ? nil : result.errors.join(", ")
+        }
+      end
+
+      def skip_record(record)
+        service = SkipService.new(id: record.id, reason: @reason, notes: @notes)
+        result = service.call
+
+        {
+          id: record.id,
+          success: result.success?,
+          new_status: "skipped",
+          error: result.success? ? nil : result.errors.join(", ")
+        }
+      end
+
+      def reset_record(record)
+        service = ResetService.new(id: record.id, notes: @notes)
+        result = service.call
+
+        {
+          id: record.id,
+          success: result.success?,
+          new_status: "pending",
+          error: result.success? ? nil : result.errors.join(", ")
+        }
+      end
+
+      def delete_record(record)
+        begin
+          record.update!(
+            metadata: (record.metadata || {}).merge(
+              deleted_at: Time.current.iso8601,
+              delete_reason: @reason,
+              delete_notes: @notes
+            )
+          )
+
+          # Soft delete (si el modelo lo soporta)
+          record.destroy if record.respond_to?(:destroy)
+
+          {
+            id: record.id,
+            success: true,
+            new_status: "deleted"
+          }
+        rescue => e
+          {
+            id: record.id,
+            success: false,
+            error: e.message
+          }
+        end
+      end
+
+      def build_message(summary)
+        case @action
+        when "retry"
+          "#{summary[:successful]} de #{summary[:total_selected]} registros procesados exitosamente"
+        when "skip"
+          "#{summary[:successful]} de #{summary[:total_selected]} registros omitidos"
+        when "reset"
+          "#{summary[:successful]} de #{summary[:total_selected]} registros reseteados a pending"
+        when "delete"
+          "#{summary[:successful]} de #{summary[:total_selected]} registros eliminados"
+        else
+          "Acción completada"
+        end
+      end
+    end
+  end
+end
+# app/services/integrations/raw_data/delete_service.rb
+module Integrations
+  module RawData
+    class DeleteService
+      def initialize(id:, reason:)
+        @raw_data = IntegrationRawData.find(id)
+        @reason = reason
+      end
+
+      def call
+        # Guardar metadata antes de eliminar
+        @raw_data.update!(
+          metadata: (@raw_data.metadata || {}).merge(
+            deleted_at: Time.current.iso8601,
+            delete_reason: @reason,
+            deleted_status: @raw_data.processing_status
+          )
+        )
+
+        # Soft delete si el modelo lo soporta
+        if @raw_data.respond_to?(:deleted_at=)
+          @raw_data.update!(deleted_at: Time.current)
+        else
+          # Si no tiene soft delete, actualizar processing_status
+          @raw_data.update!(processing_status: "deleted")
+        end
+
+        ServiceResult.success(
+          data: {
+            deleted_at: Time.current
+          }
+        )
+      rescue => e
+        ServiceResult.failure(errors: [ "Error al eliminar registro: #{e.message}" ])
+      end
+    end
+  end
+end
+
+# app/services/integrations/raw_data/get_detail_service.rb
+module Integrations
+  module RawData
+    class GetDetailService
+      def initialize(id:, options: {})
+        @id = id
+        @options = options
+      end
+
+      def call
+        raw_data = IntegrationRawData
+          .includes(:tenant_integration_configuration,
+                    :integration_sync_execution,
+                    :normalized_record,
+                    :tenant_integration_configuration)
+          .find_by(id: @id)
+
+        unless raw_data
+          return ServiceResult.failure(errors: [ "Registro no encontrado" ])
+        end
+
+        # Construir data completa
+        data = raw_data
+
+        # Si se solicitan registros similares, buscarlos
+        if @options[:include_similar]
+          data.define_singleton_method(:similar_records) do
+            find_similar_records(raw_data)
+          end
+        end
+
+        ServiceResult.success(data: data)
+      rescue => e
+        ServiceResult.failure(errors: [ "Error al obtener detalle: #{e.message}" ])
+      end
+
+      private
+
+      def find_similar_records(raw_data)
+        return nil unless raw_data.processing_status == "failed"
+
+        # Extraer la parte clave del error
+        key_error = extract_key_error_part(raw_data.normalization_error)
+
+        similar = IntegrationRawData
+          .where(tenant_integration_configuration_id: raw_data.tenant_integration_configuration_id)
+          .where(processing_status: "failed")
+          .where.not(id: raw_data.id)
+          .where("normalization_error LIKE ?", "%#{key_error}%")
+          .limit(5)
+
+        similar
+      end
+
+      def extract_key_error_part(error_message)
+        return "" unless error_message
+
+        # Si contiene "vehicle mapping", extraer el external_id
+        if error_message.include?("mapping not found")
+          match = error_message.match(/external_id[:\s]+([a-zA-Z0-9_-]+)/)
+          return "external_id: #{match[1]}" if match
+        end
+
+        # Si es otro tipo de error, tomar las primeras palabras clave
+        error_message.split(":").first&.strip || error_message[0..50]
+      end
+    end
+  end
+end
+
+# app/services/integrations/raw_data/list_service.rb
+module Integrations
+  module RawData
+    class ListService
+      def initialize(filters: {})
+        @filters = filters
+      end
+
+      def call
+        query = build_query
+        total = query.count
+
+        # Aplicar paginación
+        page = @filters[:page] || 1
+        per_page = [ @filters[:per_page] || 50, 500 ].min
+
+        paginated_records = query.offset((page - 1) * per_page).limit(per_page)
+
+        # Calcular summary (optimizado)
+        summary = calculate_summary(query, total)
+
+        ServiceResult.success(
+          data: {
+            raw_data: paginated_records,
+            total: total,
+            total_pages: (total.to_f / per_page).ceil,
+            summary: summary,
+            pagination: {
+              current_page: page,
+              per_page: per_page,
+              total_items: total,
+              total_pages: (total.to_f / per_page).ceil,
+              next_page: page < (total.to_f / per_page).ceil ? page + 1 : nil,
+              prev_page: page > 1 ? page - 1 : nil
+            }
+          }
+        )
+      rescue => e
+        ServiceResult.failure(errors: [ "Error al listar raw data: #{e.message}" ])
+      end
+
+      private
+
+      def build_query
+        query = IntegrationRawData.all
+
+        # Includes para optimizar
+        query = query.includes(:tenant_integration_configuration,
+                               :integration_sync_execution,
+                               :normalized_record)
+
+        # Filtros básicos
+        query = query.where(tenant_id: @filters[:tenant_id]) if @filters[:tenant_id]
+        query = query.where(tenant_integration_configuration_id: @filters[:integration_id]) if @filters[:integration_id]
+        query = query.where(feature_key: @filters[:feature_key]) if @filters[:feature_key]
+        query = query.where(provider_slug: @filters[:provider_slug]) if @filters[:provider_slug]
+        query = query.where(external_id: @filters[:external_id]) if @filters[:external_id]
+
+        # Filtro de estado
+        if @filters[:status].present?
+          query = query.where(processing_status: @filters[:status])
+        elsif @filters[:status_in].present?
+          query = query.where(processing_status: @filters[:status_in])
+        end
+
+        # Filtros de fecha
+        if @filters[:from_date]
+          query = query.where("created_at >= ?", @filters[:from_date].beginning_of_day)
+        end
+
+        if @filters[:to_date]
+          query = query.where("created_at <= ?", @filters[:to_date].end_of_day)
+        end
+
+        if @filters[:created_after]
+          query = query.where("created_at >= ?", @filters[:created_after])
+        end
+
+        if @filters[:created_before]
+          query = query.where("created_at <= ?", @filters[:created_before])
+        end
+
+        # Filtro de sync execution
+        query = query.where(integration_sync_execution_id: @filters[:sync_execution_id]) if @filters[:sync_execution_id]
+
+        if @filters[:only_latest_sync] && @filters[:integration_id]
+          latest_exec = IntegrationSyncExecution
+            .where(tenant_integration_configuration_id: @filters[:integration_id])
+            .order(started_at: :desc)
+            .first
+
+          query = query.where(integration_sync_execution_id: latest_exec&.id) if latest_exec
+        end
+
+        # Filtros de error
+        if @filters[:has_error] == true
+          query = query.where.not(normalization_error: nil)
+        elsif @filters[:has_error] == false
+          query = query.where(normalization_error: nil)
+        end
+
+        if @filters[:error_contains]
+          query = query.where("normalization_error LIKE ?", "%#{@filters[:error_contains]}%")
+        end
+
+        if @filters[:retriable] == true
+          query = query.where(processing_status: "failed").select do |record|
+            record.retriable_error?
+          end
+        end
+
+        # Filtro de tipo normalizado
+        query = query.where(normalized_record_type: @filters[:normalized_type]) if @filters[:normalized_type]
+
+        if @filters[:has_normalized_record] == true
+          query = query.where.not(normalized_record_id: nil)
+        elsif @filters[:has_normalized_record] == false
+          query = query.where(normalized_record_id: nil)
+        end
+
+        # Ordenamiento
+        sort_by = @filters[:sort_by] || "created_at"
+        sort_order = @filters[:sort_order] || "desc"
+
+        query = query.order("#{sort_by} #{sort_order}")
+
+        query
+      end
+
+      def calculate_summary(query, total)
+        # Usar reorder(nil) para remover el ORDER BY antes del GROUP BY
+        by_status = query.reorder(nil).group(:processing_status).count
+
+        {
+          total: total,
+          by_status: {
+            pending: by_status["pending"] || 0,
+            normalized: by_status["normalized"] || 0,
+            failed: by_status["failed"] || 0,
+            duplicate: by_status["duplicate"] || 0,
+            skipped: by_status["skipped"] || 0
+          },
+          filters_applied: @filters.reject { |k, v| v.nil? || v == false }
+        }
+      end
+    end
+  end
+end
+
+# app/services/integrations/raw_data/statistics_service.rb
+module Integrations
+  module RawData
+    class StatisticsService
+      def initialize(filters: {})
+        @filters = filters
+        @from_date = filters[:from_date] || 30.days.ago.to_date
+        @to_date = filters[:to_date] || Date.current
+      end
+
+      def call
+        query = build_base_query
+
+        data = {
+          period: {
+            from: @from_date,
+            to: @to_date,
+            days: (@to_date - @from_date).to_i + 1
+          },
+          totals: calculate_totals(query),
+          rates: calculate_rates(query),
+          by_status: calculate_by_status(query),
+          by_feature: calculate_by_feature(query),
+          by_provider: calculate_by_provider(query),
+          error_breakdown: calculate_error_breakdown(query),
+          trends: calculate_trends(query),
+          health_score: calculate_health_score(query),
+          alerts: generate_alerts(query)
+        }
+
+        ServiceResult.success(data: data)
+      rescue => e
+        ServiceResult.failure(errors: [ "Error al calcular estadísticas: #{e.message}" ])
+      end
+
+      private
+
+      def build_base_query
+        query = IntegrationRawData.where("created_at >= ? AND created_at <= ?",
+                                          @from_date.beginning_of_day,
+                                          @to_date.end_of_day)
+
+        query = query.where(tenant_integration_configuration_id: @filters[:integration_id]) if @filters[:integration_id]
+        query = query.where(tenant_id: @filters[:tenant_id]) if @filters[:tenant_id]
+
+        query
+      end
+
+      def calculate_totals(query)
+        total = query.count
+        by_status = query.group(:processing_status).count
+
+        {
+          total_records: total,
+          pending: by_status["pending"] || 0,
+          normalized: by_status["normalized"] || 0,
+          failed: by_status["failed"] || 0,
+          duplicate: by_status["duplicate"] || 0,
+          skipped: by_status["skipped"] || 0
+        }
+      end
+
+      def calculate_rates(query)
+        total = query.count
+        return { success_rate: 0, failure_rate: 0, duplicate_rate: 0 } if total.zero?
+
+        normalized = query.where(processing_status: "normalized").count
+        failed = query.where(processing_status: "failed").count
+        duplicate = query.where(processing_status: "duplicate").count
+
+        # Calcular tiempo promedio de procesamiento
+        processed = query.where.not(normalized_at: nil)
+        avg_time = if processed.any?
+          processed.pluck(:created_at, :normalized_at).map do |created, normalized|
+            ((normalized - created) * 1000).round
+          end.sum / processed.count.to_f
+        else
+          0
+        end
+
+        {
+          success_rate: ((normalized.to_f / total) * 100).round(2),
+          failure_rate: ((failed.to_f / total) * 100).round(2),
+          duplicate_rate: ((duplicate.to_f / total) * 100).round(2),
+          avg_processing_time_ms: avg_time.round
+        }
+      end
+
+      def calculate_by_status(query)
+        total = query.count
+
+        statuses = {}
+
+        [ "pending", "normalized", "failed", "duplicate", "skipped" ].each do |status|
+          count = query.where(processing_status: status).count
+
+          statuses[status] = {
+            count: count,
+            percentage: total.zero? ? 0 : ((count.to_f / total) * 100).round(2)
+          }
+
+          # Info adicional según status
+          case status
+          when "pending"
+            pending_records = query.where(processing_status: "pending").order(created_at: :asc)
+            statuses[status][:oldest] = pending_records.first&.created_at
+            statuses[status][:newest] = pending_records.last&.created_at
+
+          when "normalized"
+            processed = query.where(processing_status: "normalized").where.not(normalized_at: nil)
+            if processed.any?
+              avg = processed.pluck(:created_at, :normalized_at).map do |c, n|
+                ((n - c) * 1000).round
+              end.sum / processed.count.to_f
+
+              statuses[status][:avg_processing_time_ms] = avg.round
+            end
+
+          when "failed"
+            failed = query.where(processing_status: "failed")
+            retriable = failed.select { |r| r.retriable_error? }.count
+
+            statuses[status][:retriable] = retriable
+            statuses[status][:permanent] = count - retriable
+          end
+        end
+
+        statuses
+      end
+
+      def calculate_by_feature(query)
+        features = {}
+
+        query.group(:feature_key).count.each do |feature, count|
+          feature_query = query.where(feature_key: feature)
+
+          features[feature] = {
+            total: count,
+            normalized: feature_query.where(processing_status: "normalized").count,
+            failed: feature_query.where(processing_status: "failed").count,
+            duplicate: feature_query.where(processing_status: "duplicate").count,
+            pending: feature_query.where(processing_status: "pending").count
+          }
+        end
+
+        features
+      end
+
+      def calculate_by_provider(query)
+        providers = {}
+
+        query.group(:provider_slug).count.each do |provider, count|
+          provider_query = query.where(provider_slug: provider)
+          normalized = provider_query.where(processing_status: "normalized").count
+          failed = provider_query.where(processing_status: "failed").count
+
+          providers[provider] = {
+            total: count,
+            success_rate: count.zero? ? 0 : ((normalized.to_f / count) * 100).round(2),
+            failure_rate: count.zero? ? 0 : ((failed.to_f / count) * 100).round(2)
+          }
+        end
+
+        providers
+      end
+
+      def calculate_error_breakdown(query)
+        failed = query.where(processing_status: "failed")
+        total_failed = failed.count
+
+        return {} if total_failed.zero?
+
+        errors = {}
+
+        # Agrupar por tipo de error
+        failed.find_each do |record|
+          error_type = detect_error_type(record)
+          errors[error_type] ||= { count: 0, retriable: false }
+          errors[error_type][:count] += 1
+          errors[error_type][:retriable] = true if record.retriable_error?
+        end
+
+        # Calcular porcentajes
+        errors.transform_values do |data|
+          data.merge(
+            percentage: ((data[:count].to_f / total_failed) * 100).round(2)
+          )
+        end
+
+        errors.sort_by { |k, v| -v[:count] }.to_h
+      end
+
+      def calculate_trends(query)
+        return { daily: [] } unless @filters[:group_by]
+
+        case @filters[:group_by]
+        when "day"
+          calculate_daily_trends(query)
+        when "hour"
+          calculate_hourly_trends(query)
+        else
+          { daily: [] }
+        end
+      end
+
+      def calculate_daily_trends(query)
+        daily = []
+
+        (@from_date..@to_date).each do |date|
+          day_query = query.where("DATE(created_at) = ?", date)
+          total = day_query.count
+          normalized = day_query.where(processing_status: "normalized").count
+          failed = day_query.where(processing_status: "failed").count
+
+          daily << {
+            date: date,
+            total: total,
+            normalized: normalized,
+            failed: failed,
+            success_rate: total.zero? ? 0 : ((normalized.to_f / total) * 100).round(2)
+          }
+        end
+
+        { daily: daily }
+      end
+
+      def calculate_hourly_trends(query)
+        # Implementar si se necesita
+        { hourly: [] }
+      end
+
+      def calculate_health_score(query)
+        total = query.count
+        return { score: 0, grade: "F", factors: {} } if total.zero?
+
+        # Factores de salud
+        normalized = query.where(processing_status: "normalized").count
+        failed = query.where(processing_status: "failed").count
+        pending = query.where(processing_status: "pending").count
+
+        success_rate = ((normalized.to_f / total) * 100).round(2)
+
+        # Calcular velocidad de procesamiento
+        processed = query.where.not(normalized_at: nil).limit(100)
+        avg_time = if processed.any?
+          processed.pluck(:created_at, :normalized_at).map do |c, n|
+            ((n - c) * 1000).round
+          end.sum / processed.count.to_f
+        else
+          0
+        end
+
+        # Scoring
+        success_score = success_rate
+        speed_score = avg_time < 100 ? 100 : (10000 / avg_time.to_f).clamp(0, 100)
+        error_recovery_score = failed.zero? ? 100 : [ 100 - (failed * 2), 0 ].max
+        duplicate_score = query.where(processing_status: "duplicate").count < (total * 0.01) ? 100 : 70
+
+        # Score ponderado
+        total_score = (
+          success_score * 0.4 +
+          speed_score * 0.2 +
+          error_recovery_score * 0.2 +
+          duplicate_score * 0.2
+        ).round
+
+        # Grado
+        grade = case total_score
+        when 90..100 then "A"
+        when 80..89 then "B"
+        when 70..79 then "C"
+        when 60..69 then "D"
+        else "F"
+        end
+
+        {
+          score: total_score,
+          grade: grade,
+          factors: {
+            success_rate: { weight: 40, score: success_rate.round(2) },
+            processing_speed: { weight: 20, score: speed_score.round(2) },
+            error_recovery: { weight: 20, score: error_recovery_score.round(2) },
+            duplicate_rate: { weight: 20, score: duplicate_score.round(2) }
+          }
+        }
+      end
+
+      def generate_alerts(query)
+        alerts = []
+
+        # Alerta de pending alto
+        pending = query.where(processing_status: "pending").count
+        if pending > 50
+          alerts << {
+            severity: "warning",
+            message: "#{pending} registros pendientes de procesar (inusualmente alto)",
+            action: "Verificar estado del job de normalización"
+          }
+        end
+
+        # Alerta de errores frecuentes
+        failed = query.where(processing_status: "failed")
+        vehicle_not_found = failed.select { |r| r.normalization_error&.include?("mapping not found") }.count
+
+        if vehicle_not_found > 100
+          alerts << {
+            severity: "info",
+            message: "#{vehicle_not_found} errores 'vehicle_not_found' - considerar sincronizar mapeos",
+            action: "Ejecutar sincronización de vehículos"
+          }
+        end
+
+        # Alerta de tasa de éxito baja
+        total = query.count
+        if total > 0
+          success_rate = (query.where(processing_status: "normalized").count.to_f / total) * 100
+          if success_rate < 80
+            alerts << {
+              severity: "warning",
+              message: "Tasa de éxito baja: #{success_rate.round(2)}%",
+              action: "Revisar configuración y logs de errores"
+            }
+          end
+        end
+
+        alerts
+      end
+
+      def detect_error_type(record)
+        return "unknown" unless record.normalization_error
+
+        error_msg = record.normalization_error.downcase
+
+        case error_msg
+        when /vehicle mapping not found|vehicle not found/
+          "vehicle_not_found"
+        when /authentication|credentials/
+          "authentication_error"
+        when /invalid.*format/
+          "invalid_data_format"
+        when /missing.*field/
+          "missing_required_field"
+        when /duplicate/
+          "duplicate_detection"
+        else
+          "normalization_error"
+        end
+      end
+    end
+  end
+end
+
+# app/services/integrations/sync/global_statistics_service.rb
+module Integrations
+  module Sync
+    class GlobalStatisticsService
+      def initialize(filters = {})
+        @tenant_id = filters[:tenant_id]
+        @integration_id = filters[:integration_id]
+        @feature_key = filters[:feature_key]
+
+        # Asegurar que siempre sean Date, no Time/DateTime
+        @from_date = parse_date(filters[:from_date] || 30.days.ago)
+        @to_date = parse_date(filters[:to_date] || Date.current)
+
+        @group_by = filters[:group_by]
+      end
+
+      def call
+        executions_query = build_executions_query
+        raw_data_query = build_raw_data_query
+
+        Rails.logger.info("📊 GlobalStatisticsService - Iniciando cálculo")
+        Rails.logger.info("  Período: #{@from_date} → #{@to_date}")
+        Rails.logger.info("  Ejecuciones encontradas: #{executions_query.count}")
+        Rails.logger.info("  Raw data encontrados: #{raw_data_query.count}")
+
+        # Construir data base
+        data = {
+          period: {
+            from: @from_date,
+            to: @to_date,
+            days: (@to_date - @from_date).to_i + 1
+          },
+          filters_applied: active_filters
+        }
+
+        Rails.logger.info("  Calculando executions stats...")
+        data[:executions] = calculate_executions_stats(executions_query)
+
+        Rails.logger.info("  Calculando raw_data stats...")
+        data[:raw_data] = calculate_raw_data_stats(raw_data_query)
+
+        Rails.logger.info("  Calculando by_feature...")
+        data[:by_feature] = calculate_by_feature(executions_query, raw_data_query)
+
+        Rails.logger.info("  Calculando by_status...")
+        data[:by_status] = calculate_by_status(executions_query)
+
+        Rails.logger.info("  Calculando health_score...")
+        data[:health_score] = calculate_health_score(executions_query, raw_data_query)
+
+        Rails.logger.info("  Generando alerts...")
+        data[:alerts] = generate_alerts(executions_query, raw_data_query)
+
+        # Agregar trends solo si se solicitó agrupación
+        if @group_by.present?
+          Rails.logger.info("  Calculando trends (#{@group_by})...")
+          data[:trends] = calculate_trends(executions_query)
+        end
+
+        Rails.logger.info("✓ GlobalStatisticsService completado")
+
+        ServiceResult.success(data: data)
+      rescue StandardError => e
+        Rails.logger.error("❌ Error en GlobalStatisticsService: #{e.message}")
+        Rails.logger.error("   Clase: #{e.class.name}")
+        Rails.logger.error("   Backtrace: #{e.backtrace.first(5).join("\n   ")}")
+        ServiceResult.failure(errors: [ "Error al calcular estadísticas: #{e.message}" ])
+      end
+
+      private
+
+      def build_executions_query
+        query = IntegrationSyncExecution
+          .where("started_at >= ? AND started_at <= ?",
+                 @from_date.beginning_of_day,
+                 @to_date.end_of_day)
+
+        if @tenant_id
+          query = query.joins(:tenant_integration_configuration)
+            .where(tenant_integration_configurations: { tenant_id: @tenant_id })
+        end
+
+        query = query.where(tenant_integration_configuration_id: @integration_id) if @integration_id
+        query = query.where(feature_key: @feature_key) if @feature_key
+
+        query
+      end
+
+      def build_raw_data_query
+        query = IntegrationRawData
+          .where("created_at >= ? AND created_at <= ?",
+                 @from_date.beginning_of_day,
+                 @to_date.end_of_day)
+
+        if @tenant_id
+          query = query.joins(tenant_integration_configuration: :tenant)
+            .where(tenants: { id: @tenant_id })
+        end
+
+        query = query.where(tenant_integration_configuration_id: @integration_id) if @integration_id
+        query = query.where(feature_key: @feature_key) if @feature_key
+
+        query
+      end
+
+      def calculate_executions_stats(query)
+        total = query.count
+        completed = query.where(status: "completed").count
+        failed = query.where(status: "failed").count
+        running = query.where(status: "running").count
+
+        success_rate = total.zero? ? 0 : ((completed.to_f / total) * 100).round(2)
+
+        avg_duration = query.where.not(duration_seconds: nil)
+          .average(:duration_seconds)
+
+        # Proteger contra nil
+        avg_duration = avg_duration ? avg_duration.to_f.round(2) : 0
+
+        {
+          total: total,
+          completed: completed,
+          failed: failed,
+          running: running,
+          success_rate: success_rate,
+          avg_duration_seconds: avg_duration,
+          total_records_fetched: query.sum(:records_fetched) || 0,
+          total_records_processed: query.sum(:records_processed) || 0,
+          total_records_failed: query.sum(:records_failed) || 0
+        }
+      end
+
+      def calculate_raw_data_stats(query)
+        total = query.count
+
+        by_status = query.group(:processing_status).count
+
+        normalization_rate = if total.zero?
+          0
+        else
+          normalized = by_status["normalized"] || 0
+          ((normalized.to_f / total) * 100).round(2)
+        end
+
+        # Calcular tiempo promedio de procesamiento
+        processed = query.where.not(normalized_at: nil)
+        avg_processing_time = if processed.any?
+          times = processed.pluck(:created_at, :normalized_at).map do |created, normalized|
+            ((normalized - created) * 1000).round
+          end
+          (times.sum / times.size.to_f).round
+        else
+          0
+        end
+
+        {
+          total_records: total,
+          pending: by_status["pending"] || 0,
+          normalized: by_status["normalized"] || 0,
+          failed: by_status["failed"] || 0,
+          duplicate: by_status["duplicate"] || 0,
+          skipped: by_status["skipped"] || 0,
+          normalization_rate: normalization_rate,
+          avg_processing_time_ms: avg_processing_time
+        }
+      end
+
+      def calculate_by_feature(executions_query, raw_data_query)
+        features = {}
+
+        # Por ejecuciones
+        executions_query.group(:feature_key).count.each do |feature, count|
+          features[feature] ||= {}
+          features[feature][:executions] = count
+          features[feature][:completed] = executions_query
+            .where(feature_key: feature, status: "completed").count
+          features[feature][:failed] = executions_query
+            .where(feature_key: feature, status: "failed").count
+        end
+
+        # Por raw data
+        raw_data_query.group(:feature_key).count.each do |feature, count|
+          features[feature] ||= {}
+          features[feature][:total_records] = count
+          features[feature][:normalized] = raw_data_query
+            .where(feature_key: feature, processing_status: "normalized").count
+          features[feature][:failed_records] = raw_data_query
+            .where(feature_key: feature, processing_status: "failed").count
+        end
+
+        features
+      end
+
+      def calculate_by_status(query)
+        statuses = {}
+
+        [ "running", "completed", "failed" ].each do |status|
+          count = query.where(status: status).count
+          total = query.count
+
+          statuses[status] = {
+            count: count,
+            percentage: total.zero? ? 0 : ((count.to_f / total) * 100).round(2)
+          }
+        end
+
+        statuses
+      end
+
+      def calculate_trends(query)
+        return {} unless @group_by
+
+        case @group_by
+        when "day"
+          calculate_daily_trends(query)
+        when "week"
+          calculate_weekly_trends(query)
+        when "month"
+          calculate_monthly_trends(query)
+        when "feature"
+          calculate_feature_trends(query)
+        else
+          {}
+        end
+      end
+
+      def calculate_daily_trends(query)
+        daily = []
+
+        (@from_date..@to_date).each do |date|
+          day_executions = query.where("DATE(started_at) = ?", date)
+
+          total = day_executions.count
+          completed = day_executions.where(status: "completed").count
+          failed = day_executions.where(status: "failed").count
+
+          daily << {
+            date: date,
+            total: total,
+            completed: completed,
+            failed: failed,
+            success_rate: total.zero? ? 0 : ((completed.to_f / total) * 100).round(2)
+          }
+        end
+
+        { daily: daily }
+      end
+
+      def calculate_weekly_trends(query)
+        weekly = []
+        current_date = @from_date.beginning_of_week
+
+        while current_date <= @to_date
+          week_end = [ current_date.end_of_week, @to_date ].min
+          week_executions = query.where(started_at: current_date..week_end)
+
+          total = week_executions.count
+          completed = week_executions.where(status: "completed").count
+
+          weekly << {
+            week_start: current_date,
+            week_end: week_end,
+            total: total,
+            completed: completed,
+            failed: week_executions.where(status: "failed").count,
+            success_rate: total.zero? ? 0 : ((completed.to_f / total) * 100).round(2)
+          }
+
+          current_date += 1.week
+        end
+
+        { weekly: weekly }
+      end
+
+      def calculate_monthly_trends(query)
+        monthly = []
+        current_date = @from_date.beginning_of_month
+
+        while current_date <= @to_date
+          month_end = [ current_date.end_of_month, @to_date ].min
+          month_executions = query.where(started_at: current_date..month_end)
+
+          total = month_executions.count
+          completed = month_executions.where(status: "completed").count
+
+          monthly << {
+            month: current_date.strftime("%Y-%m"),
+            month_name: I18n.l(current_date, format: "%B %Y"),
+            total: total,
+            completed: completed,
+            failed: month_executions.where(status: "failed").count,
+            success_rate: total.zero? ? 0 : ((completed.to_f / total) * 100).round(2)
+          }
+
+          current_date += 1.month
+        end
+
+        { monthly: monthly }
+      end
+
+      def calculate_feature_trends(query)
+        features_over_time = {}
+
+        query.group(:feature_key).count.keys.each do |feature|
+          feature_data = []
+
+          (@from_date..@to_date).each do |date|
+            day_executions = query.where(feature_key: feature)
+              .where("DATE(started_at) = ?", date)
+
+            feature_data << {
+              date: date,
+              executions: day_executions.count,
+              records: day_executions.sum(:records_processed)
+            }
+          end
+
+          features_over_time[feature] = feature_data
+        end
+
+        { by_feature: features_over_time }
+      end
+
+      def calculate_health_score(executions_query, raw_data_query)
+        exec_total = executions_query.count
+        raw_total = raw_data_query.count
+
+        return {
+          score: 0,
+          grade: "N/A",
+          message: "Sin datos suficientes",
+          factors: {}
+        } if exec_total.zero?
+
+        # Factor 1: Tasa de éxito de ejecuciones (40%)
+        exec_completed = executions_query.where(status: "completed").count
+        exec_success_rate = ((exec_completed.to_f / exec_total) * 100).round(2)
+
+        # Factor 2: Tasa de normalización (30%)
+        raw_normalized = raw_data_query.where(processing_status: "normalized").count
+        normalization_rate = raw_total.zero? ? 0 : ((raw_normalized.to_f / raw_total) * 100).round(2)
+
+        # Factor 3: Velocidad de procesamiento (15%)
+        processed = raw_data_query.where.not(normalized_at: nil).limit(100)
+        avg_time = if processed.any?
+          times = processed.pluck(:created_at, :normalized_at).map { |c, n| (n - c) * 1000 }
+          times.sum / times.size.to_f
+        else
+          0
+        end
+        speed_score = avg_time < 100 ? 100 : [ 100 - ((avg_time - 100) / 10), 0 ].max.round(2)
+
+        # Factor 4: Tasa de duplicados (15%)
+        duplicates = raw_data_query.where(processing_status: "duplicate").count
+        duplicate_rate = raw_total.zero? ? 0 : ((duplicates.to_f / raw_total) * 100)
+        duplicate_score = [ 100 - (duplicate_rate * 10), 0 ].max.round(2)
+
+        # Calcular score ponderado
+        total_score = (
+          exec_success_rate * 0.4 +
+          normalization_rate * 0.3 +
+          speed_score * 0.15 +
+          duplicate_score * 0.15
+        ).round
+
+        grade = case total_score
+        when 90..100 then "A"
+        when 80..89 then "B"
+        when 70..79 then "C"
+        when 60..69 then "D"
+        else "F"
+        end
+
+        message = case grade
+        when "A" then "Excelente salud del sistema"
+        when "B" then "Buen rendimiento general"
+        when "C" then "Rendimiento aceptable, considerar mejoras"
+        when "D" then "Rendimiento bajo, revisar configuraciones"
+        else "Requiere atención inmediata"
+        end
+
+        {
+          score: total_score,
+          grade: grade,
+          message: message,
+          factors: {
+            execution_success: { weight: 40, score: exec_success_rate },
+            normalization_rate: { weight: 30, score: normalization_rate },
+            processing_speed: { weight: 15, score: speed_score },
+            duplicate_control: { weight: 15, score: duplicate_score }
+          }
+        }
+      rescue StandardError => e
+        Rails.logger.error("Error calculando health_score: #{e.message}")
+        {
+          score: 0,
+          grade: "ERROR",
+          message: "Error al calcular: #{e.message}",
+          factors: {}
+        }
+      end
+
+      def generate_alerts(executions_query, raw_data_query)
+        alerts = []
+
+        # Alerta 1: Ejecuciones fallando consistentemente
+        recent_executions = executions_query.where("started_at >= ?", 24.hours.ago)
+        recent_failed = recent_executions.where(status: "failed").count
+        if recent_failed >= 3
+          alerts << {
+            severity: "error",
+            type: "consistent_failures",
+            message: "#{recent_failed} ejecuciones fallidas en las últimas 24 horas",
+            action: "Revisar configuración y logs de errores"
+          }
+        end
+
+        # Alerta 2: Muchos registros pendientes
+        pending = raw_data_query.where(processing_status: "pending").count
+        if pending > 100
+          alerts << {
+            severity: "warning",
+            type: "high_pending_count",
+            message: "#{pending} registros pendientes de normalizar",
+            action: "Verificar que el job de normalización esté ejecutándose"
+          }
+        end
+
+        # Alerta 3: Tasa de normalización baja
+        raw_total = raw_data_query.count
+        if raw_total > 0
+          normalized = raw_data_query.where(processing_status: "normalized").count
+          rate = (normalized.to_f / raw_total) * 100
+
+          if rate < 80
+            alerts << {
+              severity: "warning",
+              type: "low_normalization_rate",
+              message: "Tasa de normalización baja: #{rate.round(2)}%",
+              action: "Revisar errores de normalización más comunes"
+            }
+          end
+        end
+
+        # Alerta 4: Errores de mapeo de vehículos
+        vehicle_errors = raw_data_query.where(processing_status: "failed")
+          .where("normalization_error LIKE ?", "%vehicle%mapping%not found%")
+          .count
+
+        if vehicle_errors > 50
+          alerts << {
+            severity: "info",
+            type: "vehicle_mapping_errors",
+            message: "#{vehicle_errors} errores de mapeo de vehículos",
+            action: "Sincronizar mapeos de vehículos con el proveedor"
+          }
+        end
+
+        # Alerta 5: Sin actividad reciente
+        last_execution = executions_query.maximum(:started_at)
+        if last_execution && last_execution < 48.hours.ago
+          alerts << {
+            severity: "warning",
+            type: "no_recent_activity",
+            message: "Sin sincronizaciones desde #{I18n.l(last_execution, format: :long)}",
+            action: "Verificar configuraciones activas y scheduler"
+          }
+        end
+
+        alerts
+      end
+
+      def active_filters
+        {
+          tenant_id: @tenant_id,
+          integration_id: @integration_id,
+          feature_key: @feature_key,
+          from_date: @from_date,
+          to_date: @to_date,
+          group_by: @group_by
+        }.compact
+      end
+
+      # Método helper para parsear fechas consistentemente
+      def parse_date(value)
+        return Date.current if value.nil?
+        return value.to_date if value.respond_to?(:to_date)
+        Date.parse(value.to_s)
+      rescue ArgumentError
+        Date.current
+      end
+    end
+  end
+end
+
+# app/services/integrations/sync/sync_execution_service.rb
+module Integrations
+  module Sync
+    class SyncExecutionService
+      attr_reader :config, :feature_key, :execution, :connector
+
+      def initialize(config, feature_key, manual: true)
+        @config = config
+        @feature_key = feature_key
+        @trigger_type = manual ? "manual" : "scheduled"
+        @execution = nil
+        @connector = nil
+        @stats = {
+          fetched: 0,
+          created: 0,
+          duplicates: 0,
+          processed: 0,
+          failed: 0,
+          skipped: 0
+        }
+      end
+
+      def call
+        return validation_error unless valid_configuration?
+
+        create_execution_record
+
+        begin
+          execute_sync_process
+          complete_execution
+          update_configuration_status
+
+          ServiceResult.success(
+            data: build_success_response,
+            message: build_completion_message
+          )
+        rescue StandardError => e
+          handle_execution_error(e)
+          ServiceResult.failure(
+            errors: [ e.message ],
+            data: { execution_id: @execution&.id }
+          )
+        end
+      end
+
+      private
+
+      def valid_configuration?
+        return false unless @config.is_active
+        return false unless @config.enabled_features.include?(@feature_key)
+        return false unless @config.credentials.present?
+        return false unless Factories::ConnectorFactory.provider_available?(@config.integration_provider.slug)
+        true
+      end
+
+      def validation_error
+        errors = []
+        errors << "La configuración no está activa" unless @config.is_active
+        errors << "La feature '#{@feature_key}' no está habilitada" unless @config.enabled_features.include?(@feature_key)
+        errors << "No hay credenciales configuradas" unless @config.credentials.present?
+        errors << "El proveedor no tiene conector implementado" unless Factories::ConnectorFactory.provider_available?(@config.integration_provider.slug)
+
+        ServiceResult.failure(errors: errors)
+      end
+
+      def create_execution_record
+        date_range = calculate_date_range
+
+        @execution = @config.integration_sync_executions.create!(
+          feature_key: @feature_key,
+          trigger_type: @trigger_type,
+          status: "running",
+          started_at: Time.current,
+          metadata: {
+            date_range: date_range,
+            provider_slug: @config.integration_provider.slug,
+            provider_name: @config.integration_provider.name
+          }
+        )
+
+        Rails.logger.info("=" * 70)
+        Rails.logger.info("🚀 Iniciando sincronización ##{@execution.id}")
+        Rails.logger.info("   Proveedor: #{@config.integration_provider.name}")
+        Rails.logger.info("   Feature: #{@feature_key}")
+        Rails.logger.info("   Trigger: #{@trigger_type}")
+        Rails.logger.info("   Desde: #{date_range[:from]}")
+        Rails.logger.info("   Hasta: #{date_range[:to]}")
+        Rails.logger.info("   Estrategia: #{date_range[:strategy]}")
+        Rails.logger.info("=" * 70)
+      end
+
+      def execute_sync_process
+        build_connector
+        fetch_raw_data
+        normalize_data
+      end
+
+      def build_connector
+        Rails.logger.info("→ Construyendo connector...")
+        @connector = Factories::ConnectorFactory.build(
+          @config.integration_provider.slug,
+          @config
+        )
+        Rails.logger.info("✓ Connector #{@connector.class.name} construido")
+      end
+
+      def fetch_raw_data
+        Rails.logger.info("→ Obteniendo datos RAW del proveedor...")
+
+        # AQUÍ ESTÁ LA CLAVE: usar el mismo date_range que guardamos en metadata
+        date_range = @execution.metadata["date_range"].symbolize_keys
+
+        Rails.logger.info("   Desde: #{date_range[:from]} (#{date_range[:from].class})")
+        Rails.logger.info("   Hasta: #{date_range[:to]} (#{date_range[:to].class})")
+        Rails.logger.info("   Estrategia: #{date_range[:strategy]}")
+
+        # LLAMADA AL CONNECTOR CON FECHAS
+        raw_response = @connector.fetch_data(
+          @feature_key,
+          date_range[:from],  # ← Estas son las fechas que van al connector
+          date_range[:to]
+        )
+
+        save_raw_data(raw_response)
+
+        Rails.logger.info("✓ Datos RAW procesados:")
+        Rails.logger.info("   Obtenidos: #{@stats[:fetched]}")
+        Rails.logger.info("   Nuevos: #{@stats[:created]}")
+        Rails.logger.info("   Duplicados: #{@stats[:duplicates]}")
+
+      rescue Connectors::BaseConnector::AuthenticationError => e
+        raise "Error de autenticación con #{@config.integration_provider.name}: #{e.message}"
+      rescue Connectors::BaseConnector::RateLimitError => e
+        raise "Límite de peticiones excedido. Intente más tarde."
+      rescue Connectors::BaseConnector::ServerError => e
+        raise "Error del servidor de #{@config.integration_provider.name}: #{e.message}"
+      rescue StandardError => e
+        raise "Error al obtener datos: #{e.message}"
+      end
+
+      def save_raw_data(raw_response)
+        @stats[:fetched] = raw_response.size
+
+        raw_response.each do |record|
+          external_id = extract_external_id(record)
+
+          raw_data = IntegrationRawData.create_or_handle_duplicate(
+            integration_sync_execution: @execution,
+            tenant_integration_configuration: @config,
+            provider_slug: @config.integration_provider.slug,
+            feature_key: @feature_key,
+            external_id: external_id,
+            raw_data: record,
+            processing_status: "pending"
+          )
+
+          if raw_data.duplicate?
+            @stats[:duplicates] += 1
+            Rails.logger.debug("  ⊘ Duplicado: #{external_id}")
+          else
+            @stats[:created] += 1
+            Rails.logger.debug("  ✓ Nuevo: #{external_id}")
+          end
+        end
+      end
+
+      def extract_external_id(record)
+        record["id"] || record[:id] || raise("Registro sin ID: #{record.inspect}")
+      end
+
+      def normalize_data
+        Rails.logger.info("→ Normalizando datos...")
+
+        result = Normalizers::NormalizeDataService.new(
+          @execution,
+          @config
+        ).call
+
+        if result.success?
+          @stats.merge!(result.data)
+          Rails.logger.info("✓ Normalización completada:")
+          Rails.logger.info("   Procesados: #{@stats[:processed]}")
+          Rails.logger.info("   Fallidos: #{@stats[:failed]}")
+          Rails.logger.info("   Omitidos: #{@stats[:skipped]}")
+        else
+          Rails.logger.warn("⚠ Normalización con errores: #{result.errors.join(', ')}")
+        end
+      end
+
+      def complete_execution
+        @execution.update_columns(
+          status: determine_final_status,
+          finished_at: Time.current,
+          duration_seconds: (Time.current - @execution.started_at).to_i,
+          records_fetched: @stats[:fetched],
+          records_processed: @stats[:processed],
+          records_failed: @stats[:failed],
+          records_skipped: @stats[:duplicates] + @stats[:skipped],
+          updated_at: Time.current
+        )
+
+        Rails.logger.info("=" * 70)
+        Rails.logger.info("#{status_emoji} Sincronización ##{@execution.id} #{@execution.status}")
+        Rails.logger.info("   Duración: #{@execution.duration_seconds}s")
+        Rails.logger.info("   Obtenidos: #{@stats[:fetched]}")
+        Rails.logger.info("   Nuevos: #{@stats[:created]}")
+        Rails.logger.info("   Procesados: #{@stats[:processed]}")
+        Rails.logger.info("   Fallidos: #{@stats[:failed]}")
+        Rails.logger.info("   Duplicados: #{@stats[:duplicates]}")
+
+        if @stats[:failed] > 0
+          Rails.logger.warn("   ⚠ #{@stats[:failed]} registros con errores de normalización")
+        end
+
+        if @stats[:duplicates] > 0
+          Rails.logger.info("   ℹ #{@stats[:duplicates]} registros duplicados omitidos")
+        end
+
+        Rails.logger.info("=" * 70)
+      end
+
+      def determine_final_status
+        if @stats[:created] == 0
+          "completed"
+        elsif @stats[:failed] == @stats[:created]
+          "failed"
+        elsif @stats[:processed] > 0
+          "completed"
+        else
+          "completed"
+        end
+      end
+
+      def status_emoji
+        case @execution.status
+        when "completed"
+          @stats[:failed] > 0 ? "⚠️" : "✅"
+        when "failed"
+          "❌"
+        else
+          "ℹ️"
+        end
+      end
+
+      def update_configuration_status
+        if @execution.status == "completed"
+          @config.update!(
+            last_sync_at: Time.current,
+            last_sync_status: @stats[:failed] > 0 ? "partial" : "success",
+            last_sync_error: @stats[:failed] > 0 ? "#{@stats[:failed]} registros con errores" : nil
+          )
+        else
+          @config.update!(
+            last_sync_at: Time.current,
+            last_sync_status: "error",
+            last_sync_error: @execution.error_message
+          )
+        end
+      end
+
+      def handle_execution_error(error)
+        Rails.logger.error("=" * 70)
+        Rails.logger.error("❌ Error en sincronización ##{@execution&.id}")
+        Rails.logger.error("   Mensaje: #{error.message}")
+        Rails.logger.error("   Tipo: #{error.class.name}")
+        Rails.logger.error("=" * 70)
+        Rails.logger.error(error.backtrace.first(10).join("\n"))
+
+        if @execution
+          @execution.update_columns(
+            status: "failed",
+            finished_at: Time.current,
+            duration_seconds: (Time.current - @execution.started_at).to_i,
+            error_message: error.message,
+            records_fetched: @stats[:fetched],
+            records_processed: @stats[:processed],
+            records_failed: @stats[:failed],
+            records_skipped: @stats[:duplicates] + @stats[:skipped],
+            updated_at: Time.current
+          )
+        end
+
+        @config.update!(
+          last_sync_at: Time.current,
+          last_sync_status: "error",
+          last_sync_error: error.message
+        )
+      end
+
+      def calculate_date_range
+        if first_sync?
+          # Primera sincronización: traer últimos 30 días
+          {
+            from: 30.days.ago.beginning_of_day,
+            to: Time.current,
+            strategy: :initial
+          }
+        elsif manual_sync?
+          # Sincronización manual: traer últimos 30 días siempre
+          # (el usuario está ejecutando manualmente, probablemente quiere ver datos recientes)
+          {
+            from: 30.days.ago.beginning_of_day,
+            to: Time.current,
+            strategy: :manual_full
+          }
+        else
+          # Sincronización automática/scheduled: incremental desde última sync
+          {
+            from: @config.last_sync_at - 2.hours,
+            to: Time.current,
+            strategy: :incremental
+          }
+        end
+      end
+
+      def first_sync?
+        @config.last_sync_at.nil? || @config.last_sync_status != "success"
+      end
+
+      def manual_sync?
+        @trigger_type == "manual"
+      end
+
+      def build_success_response
+        {
+          execution_id: @execution.id,
+          feature_key: @feature_key,
+          provider_name: @config.integration_provider.name,
+          records_fetched: @stats[:fetched],
+          records_created: @stats[:created],
+          records_processed: @stats[:processed],
+          records_failed: @stats[:failed],
+          records_duplicated: @stats[:duplicates],
+          records_skipped: @stats[:skipped],
+          duration_seconds: @execution.duration_seconds,
+          success_rate: calculate_success_rate,
+          started_at: @execution.started_at,
+          finished_at: @execution.finished_at,
+          warnings: build_warnings,
+          has_errors: @stats[:failed] > 0
+        }
+      end
+
+      def calculate_success_rate
+        return 100.0 if @stats[:created].zero?
+        ((@stats[:processed].to_f / @stats[:created]) * 100).round(2)
+      end
+
+      def build_warnings
+        warnings = []
+
+        if @stats[:failed] > 0
+          warnings << "#{@stats[:failed]} registros fallaron al normalizar (pueden reprocesarse)"
+        end
+
+        if @stats[:duplicates] > 0
+          warnings << "#{@stats[:duplicates]} registros duplicados omitidos"
+        end
+
+        if @stats[:skipped] > 0
+          warnings << "#{@stats[:skipped]} registros omitidos por validación"
+        end
+
+        warnings
+      end
+
+      def build_completion_message
+        if @stats[:failed].zero? && @stats[:created] > 0
+          "Sincronización completada exitosamente: #{@stats[:processed]} registros procesados"
+        elsif @stats[:created].zero?
+          "Sincronización completada: solo registros duplicados encontrados"
+        elsif @stats[:failed] > 0
+          "Sincronización completada con advertencias: #{@stats[:processed]} procesados, #{@stats[:failed]} con errores"
+        else
+          "Sincronización completada"
+        end
+      end
+    end
+  end
+end
+
+# app/services/integrations/tenant_configurations/activate_service.rb
+module Integrations
+  module TenantConfigurations
+    class ActivateService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        # Validar que tenga credenciales
+        unless @config.credentials.present?
+          return ServiceResult.failure(
+            errors: [ "Debe configurar las credenciales antes de activar" ]
+          )
+        end
+
+        # Validar que tenga al menos una feature habilitada
+        unless @config.enabled_features.any?
+          return ServiceResult.failure(
+            errors: [ "Debe seleccionar al menos una funcionalidad a sincronizar" ]
+          )
+        end
+
+        if @config.activate!
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración activada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al activar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al activar la configuración" ])
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/create_service.rb
+module Integrations
+  module TenantConfigurations
+    class CreateService
+      def initialize(tenant, params)
+        @tenant = tenant
+        @params = params
+      end
+
+      def call
+        # Verificar que el proveedor existe y está disponible
+        provider = IntegrationProvider.for_marketplace.find_by(id: @params[:integration_provider_id])
+        unless provider
+          return ServiceResult.failure(errors: [ "Proveedor no encontrado o no disponible" ])
+        end
+
+        # Verificar que no exista ya una configuración para este proveedor
+        existing = @tenant.tenant_integration_configurations
+          .find_by(integration_provider_id: provider.id)
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "Ya existe una configuración para este proveedor" ]
+          )
+        end
+
+        # Crear configuración
+        config = @tenant.tenant_integration_configurations.build(
+          integration_provider: provider,
+          credentials: @params[:credentials],
+          enabled_features: @params[:enabled_features] || [],
+          sync_frequency: @params[:sync_frequency] || "daily",
+          sync_hour: @params[:sync_hour] || 2,
+          sync_day_of_week: @params[:sync_day_of_week],
+          sync_day_of_month: @params[:sync_day_of_month],
+          sync_config: @params[:sync_config] || {},
+          is_active: false # Inicia inactiva hasta que se valide
+        )
+
+        if config.save
+          ServiceResult.success(
+            data: config,
+            message: "Configuración creada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al crear configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al crear la configuración" ])
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/deactivate_service.rb
+module Integrations
+  module TenantConfigurations
+    class DeactivateService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        if @config.deactivate!
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración desactivada. Los datos históricos se mantienen."
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al desactivar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al desactivar la configuración" ])
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/destroy_service.rb
+module Integrations
+  module TenantConfigurations
+    class DestroyService
+      def initialize(config)
+        @config = config
+      end
+
+      def call
+        # Validar que esté inactiva antes de eliminar
+        if @config.is_active
+          return ServiceResult.failure(
+            errors: [ "Debe desactivar la configuración antes de eliminarla" ]
+          )
+        end
+
+        if @config.destroy
+          ServiceResult.success(message: "Configuración eliminada exitosamente")
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al eliminar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al eliminar la configuración" ])
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/test_connection_service.rb
+module Integrations
+  module TenantConfigurations
+    class TestConnectionService
+      def initialize(provider_id, credentials)
+        @provider_id = provider_id
+        @credentials = credentials
+      end
+
+      def call
+        # PASO 1: Validar proveedor
+        provider = validate_provider
+        return provider unless provider.is_a?(IntegrationProvider)
+
+        # PASO 2: Verificar que tenga conector implementado
+        unless Factories::ConnectorFactory.provider_available?(provider.slug)
+          return ServiceResult.failure(
+            errors: [ "El proveedor no tiene conector implementado aún" ]
+          )
+        end
+
+        # PASO 3: Crear configuración temporal (NO se guarda en BD)
+        temp_config = build_temp_config(provider)
+
+        # PASO 4: Intentar autenticar
+        test_authentication(temp_config, provider)
+
+      rescue StandardError => e
+        Rails.logger.error("Error en test de conexión: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al probar conexión: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_provider
+        provider = IntegrationProvider.find_by(id: @provider_id)
+
+        unless provider
+          return ServiceResult.failure(
+            errors: [ "Proveedor no encontrado" ]
+          )
+        end
+
+        unless provider.available?
+          return ServiceResult.failure(
+            errors: [ "El proveedor no está disponible" ]
+          )
+        end
+
+        provider
+      end
+
+      def build_temp_config(provider)
+        # Crear instancia SIN guardar en BD
+        TenantIntegrationConfiguration.new(
+          integration_provider: provider,
+          credentials: @credentials,
+          is_active: false # No está activa, es solo para test
+        )
+      end
+
+
+      def test_authentication(temp_config, provider)
+        Rails.logger.info("→ Probando conexión con #{provider.name}...")
+
+        # Construir connector con config temporal
+        connector = ConnectorFactory.build(provider.slug, temp_config)
+
+        # Intentar autenticar
+        auth_result = connector.authenticate
+
+        if auth_result
+          # Autenticación exitosa
+          Rails.logger.info("✓ Conexión exitosa con #{provider.name}")
+
+          ServiceResult.success(
+            data: {
+              success: true,
+              provider_name: provider.name,
+              provider_slug: provider.slug,
+              message: "Conexión establecida exitosamente",
+              tested_at: Time.current
+            }
+          )
+        else
+          # Autenticación falló
+          ServiceResult.failure(
+            errors: [ "No se pudo establecer conexión con #{provider.name}" ]
+          )
+        end
+
+      rescue Integrations::Connectors::BaseConnector::AuthenticationError => e
+        # Error de credenciales
+        Rails.logger.error("✗ Test de conexión falló: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Credenciales inválidas: #{e.message}" ]
+        )
+
+      rescue Integrations::Connectors::BaseConnector::ApiError => e
+        # Error de API
+        Rails.logger.error("✗ Error de API: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Error de conexión: #{e.message}" ]
+        )
+
+      rescue StandardError => e
+        # Otro error
+        Rails.logger.error("✗ Error inesperado: #{e.message}")
+
+        ServiceResult.failure(
+          errors: [ "Error al probar conexión: #{e.message}" ]
+        )
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/update_credentials_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateCredentialsService
+      def initialize(config, new_credentials, test_connection: false)
+        @config = config
+        @new_credentials = new_credentials
+        @test_connection = test_connection
+        @was_active = config.is_active
+      end
+
+      def call
+        # PASO 1: Validar estructura de credenciales
+        validation = validate_credentials_structure
+        return validation if validation.failure?
+
+        # PASO 2: Si está activa, desactivar temporalmente
+        @config.update!(is_active: false) if @was_active
+
+        # PASO 3: Actualizar credenciales
+        unless @config.update(credentials: @new_credentials)
+          return ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+        # PASO 4: Limpiar estado de última sync
+        @config.update!(last_sync_status: nil, last_sync_error: nil)
+
+        # PASO 5: Probar conexión si se solicita
+        if @test_connection
+          test_result = test_new_connection
+          return test_result if test_result.failure?
+        end
+
+        # PASO 6: Re-activar si estaba activa
+        @config.update!(is_active: true) if @was_active
+
+        ServiceResult.success(
+          data: @config,
+          message: "Credenciales actualizadas exitosamente"
+        )
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar credenciales: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar credenciales: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_credentials_structure
+        schema = @config.integration_provider.integration_auth_schema
+        return ServiceResult.failure(errors: [ "Proveedor sin schema de autenticación" ]) unless schema
+
+        required_fields = schema.required_fields.map { |f| f["name"] }
+        missing_fields = required_fields - @new_credentials.keys.map(&:to_s)
+
+        if missing_fields.any?
+          return ServiceResult.failure(
+            errors: [ "Faltan campos requeridos: #{missing_fields.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+
+      def test_new_connection
+        result = TestConnectionService.new(
+          @config.integration_provider.id,
+          @new_credentials
+        ).call
+
+        unless result.success?
+          return ServiceResult.failure(
+            errors: [ "Test de conexión falló: #{result.errors.join(', ')}" ]
+          )
+        end
+
+        ServiceResult.success
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/update_features_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateFeaturesService
+      def initialize(config, enabled_features)
+        @config = config
+        @enabled_features = enabled_features
+      end
+
+      def call
+        # PASO 1: Validar que las features existan
+        validation = validate_features
+        return validation if validation.failure?
+
+        # PASO 2: Actualizar features
+        if @config.update(enabled_features: @enabled_features)
+          ServiceResult.success(
+            data: @config,
+            message: "Features actualizadas exitosamente"
+          )
+        else
+          ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar features: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar features: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_features
+        unless @enabled_features.is_a?(Array)
+          return ServiceResult.failure(
+            errors: [ "enabled_features debe ser un array" ]
+          )
+        end
+
+        available_features = @config.integration_provider.integration_features.active.pluck(:feature_key)
+        invalid_features = @enabled_features - available_features
+
+        if invalid_features.any?
+          return ServiceResult.failure(
+            errors: [ "Features no disponibles: #{invalid_features.join(', ')}" ],
+            data: { available_features: available_features }
+          )
+        end
+
+        ServiceResult.success
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/update_schedule_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateScheduleService
+      def initialize(config, schedule_params)
+        @config = config
+        @schedule_params = schedule_params
+      end
+
+      def call
+        # PASO 1: Validar parámetros de programación
+        validation = validate_schedule_params
+        return validation if validation.failure?
+
+        # PASO 2: Actualizar programación
+        if @config.update(@schedule_params)
+          ServiceResult.success(
+            data: @config,
+            message: "Programación actualizada exitosamente"
+          )
+        else
+          ServiceResult.failure(
+            errors: @config.errors.full_messages
+          )
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar programación: #{e.message}")
+        ServiceResult.failure(
+          errors: [ "Error al actualizar programación: #{e.message}" ]
+        )
+      end
+
+      private
+
+      def validate_schedule_params
+        # Validar frecuencia
+        unless %w[daily weekly monthly].include?(@schedule_params[:sync_frequency])
+          return ServiceResult.failure(
+            errors: [ "Frecuencia no válida: #{@schedule_params[:sync_frequency]}" ]
+          )
+        end
+
+        # Validar hora
+        hour = @schedule_params[:sync_hour]
+        unless hour.is_a?(Integer) && hour >= 0 && hour <= 23
+          return ServiceResult.failure(
+            errors: [ "Hora no válida: #{hour}" ]
+          )
+        end
+        ServiceResult.success
+      end
+    end
+  end
+end
+# app/services/integrations/tenant_configurations/update_service.rb
+module Integrations
+  module TenantConfigurations
+    class UpdateService
+      def initialize(config, params)
+        @config = config
+        @params = params
+      end
+
+      def call
+        # Si se actualizan credenciales, marcar para revalidación
+        if @params.key?(:credentials) && @params[:credentials] != @config.credentials
+          @params[:last_sync_status] = nil
+          @params[:last_sync_error] = nil
+        end
+
+        if @config.update(@params)
+          ServiceResult.success(
+            data: @config,
+            message: "Configuración actualizada exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: @config.errors.full_messages)
+        end
+      rescue StandardError => e
+        Rails.logger.error("Error al actualizar configuración: #{e.message}")
+        ServiceResult.failure(errors: [ "Error al actualizar la configuración" ])
+      end
+    end
+  end
+end
+# app/services/integrations/vehicle_mappings/create_mapping_service.rb
+module Integrations
+  module VehicleMappings
+    class CreateMappingService
+      def initialize(config, vehicle, external_vehicle_id, external_vehicle_name = nil)
+        @config = config
+        @vehicle = vehicle
+        @external_vehicle_id = external_vehicle_id
+        @external_vehicle_name = external_vehicle_name
+      end
+
+      def call
+        # Verificar si ya existe mapeo para este external_vehicle_id
+        existing = @config.vehicle_provider_mappings.find_by(
+          external_vehicle_id: @external_vehicle_id
+        )
+
+        if existing
+          return ServiceResult.failure(
+            errors: [ "El vehículo externo '#{@external_vehicle_id}' ya está mapeado" ]
+          )
+        end
+
+        # Crear mapeo
+        mapping = @config.vehicle_provider_mappings.build(
+          vehicle: @vehicle,
+          external_vehicle_id: @external_vehicle_id,
+          external_vehicle_name: @external_vehicle_name,
+          is_active: true,
+          mapped_at: Time.current
+        )
+
+        if mapping.save
+          ServiceResult.success(
+            data: mapping,
+            message: "Mapeo creado exitosamente"
+          )
+        else
+          ServiceResult.failure(errors: mapping.errors.full_messages)
+        end
+
+      rescue StandardError => e
+        Rails.logger.error("Error al crear mapeo: #{e.message}")
+        ServiceResult.failure(errors: [ e.message ])
+      end
+    end
+  end
+end
+# app/services/service_result.rb
+class ServiceResult
+  attr_reader :data, :errors, :message
+
+  def initialize(success:, data: nil, errors: [], message: nil)
+    @success = success
+    @data = data
+    @errors = errors
+    @message = message
+  end
+
+  def success?
+    @success
+  end
+
+  def failure?
+    !@success
+  end
+
+  def self.success(data: nil, message: nil)
+    new(success: true, data: data, message: message)
+  end
+
+  def self.failure(errors: [], data: nil, message: nil)
+    new(success: false, errors: errors, data: data, message: message)
+  end
+end
