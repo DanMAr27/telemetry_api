@@ -83,6 +83,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/connection_test_result_entity.rb
 module Entities
   class ConnectionTestResultEntity < Grape::Entity
@@ -95,6 +96,7 @@ module Entities
     expose :details, if: ->(result, _options) { result[:details].present? }
   end
 end
+
 # app/api/entities/error_entity.rb
 module Entities
   class ErrorEntity < Grape::Entity
@@ -104,6 +106,7 @@ module Entities
     expose :field, if: ->(instance, _options) { instance.key?(:field) }
   end
 end
+
 # app/api/entities/integration_auth_schema_entity.rb
 module Entities
   class IntegrationAuthSchemaEntity < Grape::Entity
@@ -114,18 +117,28 @@ module Entities
     expose :is_active
     expose :created_at
     expose :updated_at
-    expose :integration_provider, using: Entities::IntegrationProviderEntity, if: { include_provider: true }
+    expose :integration_provider, if: { include_provider: true } do |schema, _options|
+      {
+        id: schema.integration_provider.id,
+        name: schema.integration_provider.name,
+        slug: schema.integration_provider.slug
+      }
+    end
+
     expose :field_names, if: { include_computed: true } do |schema, _options|
       schema.field_names
     end
+
     expose :required_fields, if: { include_computed: true } do |schema, _options|
       schema.required_fields
     end
+
     expose :total_fields_count, if: { include_counts: true } do |schema, _options|
       schema.auth_fields.is_a?(Array) ? schema.auth_fields.count : 0
     end
   end
 end
+
 # app/api/entities/integration_category_entity.rb
 module Entities
   class IntegrationCategoryEntity < Grape::Entity
@@ -138,12 +151,26 @@ module Entities
     expose :is_active
     expose :created_at
     expose :updated_at
-    expose :integration_providers, using: Entities::IntegrationProviderEntity, if: { include_providers: true }
+    expose :integration_providers, if: { include_providers: true } do |category, _options|
+      category.integration_providers.map do |provider|
+        {
+          id: provider.id,
+          name: provider.name,
+          slug: provider.slug,
+          description: provider.description,
+          logo_url: provider.logo_url,
+          status: provider.status,
+          is_premium: provider.is_premium
+        }
+      end
+    end
+
     expose :active_providers_count, if: { include_counts: true } do |category, _options|
       category.integration_providers.active.count
     end
   end
 end
+
 # app/api/entities/integration_feature_entity.rb
 module Entities
   class IntegrationFeatureEntity < Grape::Entity
@@ -156,12 +183,21 @@ module Entities
     expose :is_active
     expose :created_at
     expose :updated_at
-    expose :integration_provider, using: Entities::IntegrationProviderEntity, if: { include_provider: true }
+    expose :integration_provider, if: { include_provider: true } do |feature, _options|
+      {
+        id: feature.integration_provider.id,
+        name: feature.integration_provider.name,
+        slug: feature.integration_provider.slug,
+        logo_url: feature.integration_provider.logo_url
+      }
+    end
+
     expose :available, if: { include_computed: true } do |feature, _options|
       feature.available?
     end
   end
 end
+
 # app/api/entities/integration_provider_entity.rb
 module Entities
   class IntegrationProviderEntity < Grape::Entity
@@ -181,7 +217,18 @@ module Entities
     expose :updated_at
     expose :integration_category, using: Entities::IntegrationCategoryEntity, if: { include_category: true }
     expose :integration_auth_schema, using: Entities::IntegrationAuthSchemaEntity, if: { include_auth_schema: true }
-    expose :integration_features, using: Entities::IntegrationFeatureEntity, if: { include_features: true }
+    expose :integration_features, if: { include_features: true } do |provider, _options|
+      provider.integration_features.map do |feature|
+        {
+          id: feature.id,
+          feature_key: feature.feature_key,
+          feature_name: feature.feature_name,
+          feature_description: feature.feature_description,
+          display_order: feature.display_order,
+          is_active: feature.is_active
+        }
+      end
+    end
     expose :available, if: { include_computed: true } do |provider, _options|
       provider.available?
     end
@@ -193,6 +240,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/integration_raw_data_detail_entity.rb
 module Entities
   class IntegrationRawDataDetailEntity < Grape::Entity
@@ -902,6 +950,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/tenant_entity.rb
 module Entities
   class TenantEntity < Grape::Entity
@@ -982,6 +1031,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/tenant_integration_configuration_entity.rb
 module Entities
   class TenantIntegrationConfigurationEntity < Grape::Entity
@@ -1025,21 +1075,53 @@ module Entities
     expose :has_credentials, if: { include_computed: true } do |config, _options|
       config.credentials.present?
     end
+
     expose :has_error, if: { include_computed: true } do |config, _options|
-      config.has_error?
+      config.last_sync_status == "error"
     end
+
     expose :sync_schedule_description, if: { include_computed: true } do |config, _options|
-      config.sync_schedule_description
+      case config.sync_frequency
+      when "daily"
+        "Todos los días a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      when "weekly"
+        day_names = %w[Domingo Lunes Martes Miércoles Jueves Viernes Sábado]
+        day_name = day_names[config.sync_day_of_week || 0]
+        "Todos los #{day_name} a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      when "monthly"
+        day_desc = config.sync_day_of_month == "start" ? "el primer día del mes" : "el último día del mes"
+        "#{day_desc.capitalize} a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      else
+        "No configurada"
+      end
     end
     expose :next_sync_at, if: { include_computed: true } do |config, _options|
-      config.calculate_next_sync_at if config.is_active
+      next nil unless config.is_active
+      next nil unless config.last_sync_at
+
+      base_time = config.last_sync_at
+
+      case config.sync_frequency
+      when "daily"
+        base_time + 1.day
+      when "weekly"
+        base_time + 1.week
+      when "monthly"
+        base_time + 1.month
+      else
+        nil
+      end
     end
     expose :available_features, if: { include_features: true } do |config, _options|
-      config.available_features.map do |feature|
+      provider = config.integration_provider
+      features = provider.integration_features.where(is_active: true).order(:display_order)
+
+      features.map do |feature|
         {
           feature_key: feature.feature_key,
           feature_name: feature.feature_name,
-          feature_description: feature.feature_description
+          feature_description: feature.feature_description,
+          is_enabled: config.enabled_features.include?(feature.feature_key)
         }
       end
     end
@@ -1059,13 +1141,14 @@ module Entities
     end
     expose :status_badge do |config, _options|
       if config.is_active
-        config.has_error? ? "active_with_errors" : "active"
+        config.last_sync_status == "error" ? "active_with_errors" : "active"
       else
         "inactive"
       end
     end
   end
 end
+
 # app/api/entities/tenant_integration_configuration_summary_entity.rb
 module Entities
   class TenantIntegrationConfigurationSummaryEntity < Grape::Entity
@@ -1109,6 +1192,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/tenant_summary_entity.rb
 module Entities
   class TenantSummaryEntity < Grape::Entity
@@ -1126,17 +1210,9 @@ module Entities
       else "default"
       end
     end
-    expose :active_integrations_count do |tenant, _options|
-      tenant.tenant_integration_configurations.active.count
-    end
-    expose :vehicles_count do |tenant, _options|
-      tenant.vehicles.count
-    end
-    expose :last_sync_at do |tenant, _options|
-      tenant.tenant_integration_configurations.maximum(:last_sync_at)
-    end
   end
 end
+
 # app/api/entities/vehicle_electric_charge_entity.rb
 module Entities
   class VehicleElectricChargeEntity < Grape::Entity

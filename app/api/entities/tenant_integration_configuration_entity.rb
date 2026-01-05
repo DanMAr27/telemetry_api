@@ -41,21 +41,53 @@ module Entities
     expose :has_credentials, if: { include_computed: true } do |config, _options|
       config.credentials.present?
     end
+
     expose :has_error, if: { include_computed: true } do |config, _options|
-      config.has_error?
+      config.last_sync_status == "error"
     end
+
     expose :sync_schedule_description, if: { include_computed: true } do |config, _options|
-      config.sync_schedule_description
+      case config.sync_frequency
+      when "daily"
+        "Todos los días a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      when "weekly"
+        day_names = %w[Domingo Lunes Martes Miércoles Jueves Viernes Sábado]
+        day_name = day_names[config.sync_day_of_week || 0]
+        "Todos los #{day_name} a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      when "monthly"
+        day_desc = config.sync_day_of_month == "start" ? "el primer día del mes" : "el último día del mes"
+        "#{day_desc.capitalize} a las #{config.sync_hour.to_s.rjust(2, '0')}:00"
+      else
+        "No configurada"
+      end
     end
     expose :next_sync_at, if: { include_computed: true } do |config, _options|
-      config.calculate_next_sync_at if config.is_active
+      next nil unless config.is_active
+      next nil unless config.last_sync_at
+
+      base_time = config.last_sync_at
+
+      case config.sync_frequency
+      when "daily"
+        base_time + 1.day
+      when "weekly"
+        base_time + 1.week
+      when "monthly"
+        base_time + 1.month
+      else
+        nil
+      end
     end
     expose :available_features, if: { include_features: true } do |config, _options|
-      config.available_features.map do |feature|
+      provider = config.integration_provider
+      features = provider.integration_features.where(is_active: true).order(:display_order)
+
+      features.map do |feature|
         {
           feature_key: feature.feature_key,
           feature_name: feature.feature_name,
-          feature_description: feature.feature_description
+          feature_description: feature.feature_description,
+          is_enabled: config.enabled_features.include?(feature.feature_key)
         }
       end
     end
@@ -75,7 +107,7 @@ module Entities
     end
     expose :status_badge do |config, _options|
       if config.is_active
-        config.has_error? ? "active_with_errors" : "active"
+        config.last_sync_status == "error" ? "active_with_errors" : "active"
       else
         "inactive"
       end

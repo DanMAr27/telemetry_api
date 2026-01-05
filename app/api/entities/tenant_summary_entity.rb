@@ -15,14 +15,5 @@ module Entities
       else "default"
       end
     end
-    expose :active_integrations_count do |tenant, _options|
-      tenant.tenant_integration_configurations.active.count
-    end
-    expose :vehicles_count do |tenant, _options|
-      tenant.vehicles.count
-    end
-    expose :last_sync_at do |tenant, _options|
-      tenant.tenant_integration_configurations.maximum(:last_sync_at)
-    end
   end
 end
