@@ -16,8 +16,10 @@ class CreateIntegrationSyncExecutions < ActiveRecord::Migration[7.0]
       t.integer :records_processed, default: 0, null: false
       t.integer :records_failed, default: 0, null: false
       t.integer :records_skipped, default: 0, null: false
+      t.integer :duplicate_records, default: 0, null: false
       t.text :error_message
       t.jsonb :metadata, default: {}, null: false
+      t.jsonb :duplicate_external_ids, default: []
       t.timestamps
     end
     add_index :integration_sync_executions, :feature_key

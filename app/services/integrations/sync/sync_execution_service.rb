@@ -140,6 +140,7 @@ module Integrations
 
       def save_raw_data(raw_response)
         @stats[:fetched] = raw_response.size
+        duplicate_ids = []
 
         raw_response.each do |record|
           external_id = extract_external_id(record)
@@ -154,13 +155,24 @@ module Integrations
             processing_status: "pending"
           )
 
-          if raw_data.duplicate?
+          if raw_data.nil?
+            # Duplicado idéntico → no se creó registro
             @stats[:duplicates] += 1
-            Rails.logger.debug("  ⊘ Duplicado: #{external_id}")
+            duplicate_ids << external_id
+            Rails.logger.debug("  ⊘ Duplicado descartado: #{external_id}")
           else
+            # Nuevo o actualizado
             @stats[:created] += 1
-            Rails.logger.debug("  ✓ Nuevo: #{external_id}")
+            Rails.logger.debug("  ✓ Nuevo registro: #{external_id}")
           end
+        end
+
+        # Guardar los external_ids duplicados en el metadata de la ejecución
+        if duplicate_ids.any?
+          @execution.update_column(
+            :duplicate_external_ids,
+            (@execution.duplicate_external_ids || []) + duplicate_ids
+          )
         end
       end
 
@@ -196,6 +208,7 @@ module Integrations
           records_processed: @stats[:processed],
           records_failed: @stats[:failed],
           records_skipped: @stats[:duplicates] + @stats[:skipped],
+          duplicate_records: @stats[:duplicates],
           updated_at: Time.current
         )
 
@@ -276,6 +289,7 @@ module Integrations
             records_processed: @stats[:processed],
             records_failed: @stats[:failed],
             records_skipped: @stats[:duplicates] + @stats[:skipped],
+            duplicate_records: @stats[:duplicates],
             updated_at: Time.current
           )
         end

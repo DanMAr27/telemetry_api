@@ -124,8 +124,10 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.integer "records_processed", default: 0, null: false
     t.integer "records_failed", default: 0, null: false
     t.integer "records_skipped", default: 0, null: false
+    t.integer "duplicate_records", default: 0, null: false
     t.text "error_message"
     t.jsonb "metadata", default: {}, null: false
+    t.jsonb "duplicate_external_ids", default: []
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["feature_key"], name: "index_integration_sync_executions_on_feature_key"

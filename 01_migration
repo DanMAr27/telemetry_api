@@ -1,3 +1,20 @@
+class CreateVersions < ActiveRecord::Migration[8.0]
+  TEXT_BYTES = 1_073_741_823
+
+  def change
+    create_table :versions do |t|
+      t.string   :whodunnit
+      t.datetime :created_at
+
+      t.bigint   :item_id,   null: false
+      t.string   :item_type, null: false
+      t.string   :event,     null: false
+      t.text     :object, limit: TEXT_BYTES
+    end
+    add_index :versions, %i[item_type item_id]
+  end
+end
+
 # db/migrate/create_integration_categories.rb
 class CreateIntegrationCategories < ActiveRecord::Migration[7.0]
   def change
@@ -23,7 +40,6 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
   def change
     create_table :integration_providers do |t|
       t.references :integration_category, null: false, foreign_key: true, index: true
-
       t.string :name, null: false, limit: 100
       t.string :slug, null: false, limit: 50
       t.string :api_base_url, limit: 500
@@ -34,7 +50,6 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
       t.boolean :is_premium, default: false, null: false
       t.integer :display_order, default: 999, null: false
       t.boolean :is_active, default: true, null: false
-
       t.timestamps
     end
 
@@ -51,11 +66,9 @@ class CreateIntegrationAuthSchemas < ActiveRecord::Migration[7.0]
   def change
     create_table :integration_auth_schemas do |t|
       t.references :integration_provider, null: false, foreign_key: true
-
       t.jsonb :auth_fields, null: false, default: {}
       t.jsonb :example_credentials, default: {}
       t.boolean :is_active, default: true, null: false
-
       t.timestamps
     end
     add_index :integration_auth_schemas, :integration_provider_id,
@@ -72,20 +85,16 @@ class CreateIntegrationFeatures < ActiveRecord::Migration[7.0]
   def change
     create_table :integration_features do |t|
       t.references :integration_provider, null: false, foreign_key: true, index: true
-
       t.string :feature_key, null: false, limit: 50
       t.string :feature_name, null: false, limit: 100
       t.text :feature_description
       t.integer :display_order, default: 999, null: false
       t.boolean :is_active, default: true, null: false
-
       t.timestamps
     end
-
     add_index :integration_features, [ :integration_provider_id, :feature_key ],
               unique: true,
               name: 'idx_features_provider_key'
-
     add_index :integration_features, :feature_key
     add_index :integration_features, :is_active
     add_index :integration_features, :display_order
@@ -163,8 +172,10 @@ class CreateIntegrationSyncExecutions < ActiveRecord::Migration[7.0]
       t.integer :records_processed, default: 0, null: false
       t.integer :records_failed, default: 0, null: false
       t.integer :records_skipped, default: 0, null: false
+      t.integer :duplicate_records, default: 0, null: false
       t.text :error_message
       t.jsonb :metadata, default: {}, null: false
+      t.jsonb :duplicate_external_ids, default: []
       t.timestamps
     end
     add_index :integration_sync_executions, :feature_key
@@ -176,6 +187,7 @@ class CreateIntegrationSyncExecutions < ActiveRecord::Migration[7.0]
               name: 'idx_sync_exec_config_date'
   end
 end
+
 # db/migrate/YYYYMMDDHHMMSS_create_integration_raw_data.rb
 class CreateIntegrationRawData < ActiveRecord::Migration[7.0]
   def change
@@ -229,7 +241,6 @@ class CreateIntegrationRawData < ActiveRecord::Migration[7.0]
               where: "deleted_at IS NULL"
   end
 end
-
 # db/migrate/create_vehicles.rb
 class CreateVehicles < ActiveRecord::Migration[7.0]
   def change
@@ -264,7 +275,6 @@ class CreateVehicles < ActiveRecord::Migration[7.0]
     add_index :vehicles, [ :tenant_id, :status ], name: 'idx_vehicles_tenant_status'
   end
 end
-
 # db/migrate/create_vehicle_electric_charges.rb
 class CreateVehicleElectricCharges < ActiveRecord::Migration[7.0]
   def change
@@ -297,7 +307,6 @@ class CreateVehicleElectricCharges < ActiveRecord::Migration[7.0]
     add_index :vehicle_electric_charges, :is_estimated
   end
 end
-
 # db/migrate/create_vehicle_refuelings.rb
 class CreateVehicleRefuelings < ActiveRecord::Migration[7.0]
   def change
@@ -327,7 +336,6 @@ class CreateVehicleRefuelings < ActiveRecord::Migration[7.0]
     add_index :vehicle_refuelings, :is_estimated
   end
 end
-
 # db/migrate/YYYYMMDDHHMMSS_create_vehicle_provider_mappings.rb
 class CreateVehicleProviderMappings < ActiveRecord::Migration[7.0]
   def change

@@ -38,11 +38,11 @@ module Entities
           key: feature.feature_key,
           name: feature.feature_name,
           description: feature.feature_description,
-          enabled_by_default: false # Todas empiezan deshabilitadas
+          enabled_by_default: false
         }
       end
     end
-    expose :sync_schedule_options do
+    expose :sync_schedule_options do |_provider, _options|
       {
         frequencies: [
           { value: "daily", label: "Diaria", description: "Se ejecuta todos los días" },
@@ -64,22 +64,6 @@ module Entities
           { value: "end", label: "Último día del mes" }
         ]
       }
-    end
-    expose :validation_rules do |provider, _options|
-      schema = provider.integration_auth_schema
-      next {} unless schema
-
-      rules = {}
-      schema.auth_fields.each do |field|
-        rules[field["name"]] = {
-          required: field["required"] || false,
-          type: field["type"],
-          min_length: field["min_length"],
-          max_length: field["max_length"],
-          pattern: field["pattern"]
-        }.compact
-      end
-      rules
     end
   end
 end
@@ -104,6 +88,61 @@ module Entities
     expose :message
     expose :details, if: { include_details: true }
     expose :field, if: ->(instance, _options) { instance.key?(:field) }
+  end
+end
+
+# app/api/entities/global_statistics_entity.rb
+module Entities
+  class GlobalStatisticsEntity < Grape::Entity
+    expose :period do |data|
+      data[:period]
+    end
+
+    expose :filters_applied do |data|
+      data[:filters_applied]
+    end
+
+    expose :executions do |data|
+      data[:executions]
+    end
+
+    expose :raw_data do |data|
+      data[:raw_data]
+    end
+
+    expose :by_feature do |data|
+      data[:by_feature]
+    end
+
+    expose :by_status do |data|
+      data[:by_status]
+    end
+
+    expose :trends, if: ->(data, _options) { data[:trends].present? } do |data|
+      data[:trends]
+    end
+
+    expose :health_score do |data|
+      data[:health_score]
+    end
+
+    expose :alerts do |data|
+      data[:alerts]
+    end
+
+    expose :summary do |data|
+      exec = data[:executions]
+      raw = data[:raw_data]
+
+      {
+        total_executions: exec[:total],
+        success_rate: exec[:success_rate],
+        total_records_processed: exec[:total_records_processed],
+        normalization_rate: raw[:normalization_rate],
+        health_grade: data[:health_score][:grade],
+        active_alerts: data[:alerts].count
+      }
+    end
   end
 end
 
@@ -244,40 +283,29 @@ end
 # app/api/entities/integration_raw_data_detail_entity.rb
 module Entities
   class IntegrationRawDataDetailEntity < Grape::Entity
-    # Información básica
     expose :id
     expose :integration_sync_execution_id
     expose :tenant_integration_configuration_id
-
     expose :provider_slug
     expose :feature_key
     expose :external_id
-
-    # Estado y procesamiento
     expose :processing_status
     expose :normalization_error
     expose :normalized_at
     expose :created_at
     expose :updated_at
-
-    # Raw data completo
     expose :raw_data
-
-    # Metadata extendida
     expose :metadata do |obj|
       base = obj.metadata || {}
 
       base.merge({
         retry_count: obj.retry_count || 0,
         last_retry_at: obj.last_retry_at,
-        # Llamada corregida indicando la clase:
         error_type: Entities::IntegrationRawDataDetailEntity.detect_error_type(obj),
         processing_duration_ms: Entities::IntegrationRawDataDetailEntity.calculate_duration(obj),
         normalizer_class: "#{obj.provider_slug.classify}::#{obj.feature_key.classify}Normalizer"
       })
     end
-
-    # Sync execution completa
     expose :sync_execution do |obj|
       next nil unless obj.integration_sync_execution
 
@@ -294,8 +322,6 @@ module Entities
         url: "/api/v1/integrations/#{obj.tenant_integration_configuration_id}/sync-executions/#{exec.id}"
       }
     end
-
-    # Configuración
     expose :configuration do |obj|
       next nil unless obj.tenant_integration_configuration
 
@@ -313,8 +339,6 @@ module Entities
         }
       }
     end
-
-    # Normalized record completo
     expose :normalized_record do |obj|
       next nil unless obj.normalized_record
 
@@ -365,20 +389,14 @@ module Entities
         }
       end
     end
-
-    # Timeline de eventos
     expose :timeline do |obj|
       events = []
-
-      # Creación
       events << {
         timestamp: obj.created_at,
         event: "created",
         status: "pending",
         description: "Registro raw creado"
       }
-
-      # Normalización (éxito o error)
       if obj.normalized_at
         events << {
           timestamp: obj.normalized_at,
@@ -390,12 +408,10 @@ module Entities
           error: obj.normalization_error
         }
       end
-
-      # Reintentos
       if obj.retry_count && obj.retry_count > 0
         (1..obj.retry_count).each do |attempt|
           events << {
-            timestamp: obj.last_retry_at, # Simplificado, idealmente guardar cada timestamp
+            timestamp: obj.last_retry_at,
             event: "retry_attempted",
             status: obj.processing_status,
             description: "Reintento #{attempt} - #{obj.processing_status == 'failed' ? 'Fallido' : 'Exitoso'}",
@@ -403,40 +419,8 @@ module Entities
           }
         end
       end
-
-      # Ordenar por timestamp
       events.sort_by { |e| e[:timestamp] }
     end
-
-    # Registros similares (mismo error/vehículo)
-    expose :similar_records do |obj, opts|
-      next nil unless opts[:include_similar]
-      next nil unless obj.processing_status == "failed"
-
-      # Buscar registros con el mismo error
-      similar = IntegrationRawData
-        .where(tenant_integration_configuration_id: obj.tenant_integration_configuration_id)
-        .where(processing_status: "failed")
-        .where.not(id: obj.id)
-        .where("normalization_error LIKE ?", "%#{extract_key_error_part(obj.normalization_error)}%")
-        .limit(5)
-
-      {
-        count: similar.count,
-        records: similar.map do |rec|
-          {
-            id: rec.id,
-            external_id: rec.external_id,
-            status: rec.processing_status,
-            error: rec.normalization_error,
-            created_at: rec.created_at
-          }
-        end,
-        suggestion: build_similarity_suggestion(obj, similar)
-      }
-    end
-
-    # Acciones disponibles
     expose :available_actions do |obj, opts|
       Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
     end
@@ -468,16 +452,11 @@ module Entities
     end
 
     def self.extract_key_error_part(error_message)
-      # Extraer la parte clave del error para buscar similares
       return "" unless error_message
-
-      # Si contiene "vehicle mapping", extraer el external_id
       if error_message.include?("mapping not found")
         match = error_message.match(/external_id[:\s]+([a-zA-Z0-9_-]+)/)
         return "external_id: #{match[1]}" if match
       end
-
-      # Si es otro tipo de error, tomar las primeras palabras clave
       error_message.split(":").first&.strip || error_message[0..50]
     end
 
@@ -502,6 +481,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/integration_raw_data_entity.rb
 module Entities
   class IntegrationRawDataEntity < Grape::Entity
@@ -562,7 +542,6 @@ module Entities
       Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
     end
 
-    # Define el método como un método de CLASE (self.)
     def self.build_available_actions(obj, _opts = {})
       actions = []
 
@@ -580,6 +559,38 @@ module Entities
     end
   end
 end
+
+# app/api/entities/integration_sync_execution_detail_entity.rb
+module Entities
+  class IntegrationSyncExecutionDetailEntity < Grape::Entity
+    expose :id
+    expose :integration do |data|
+      data[:integration]
+    end
+    expose :execution do |data|
+      data[:execution]
+    end
+    expose :statistics do |data|
+      data[:statistics]
+    end
+    expose :metadata do |data|
+      data[:metadata]
+    end
+    expose :timeline, if: ->(data, opts) { data[:timeline].present? } do |data|
+      data[:timeline]
+    end
+    expose :raw_data_sample, if: ->(data, opts) { data[:raw_data_sample].present? } do |data|
+      data[:raw_data_sample]
+    end
+    expose :errors_summary, if: ->(data, opts) { data[:errors_summary].present? } do |data|
+      data[:errors_summary]
+    end
+    expose :related_data do |data|
+      data[:related_data]
+    end
+  end
+end
+
 # app/api/entities/integration_sync_execution_entity.rb
 module Entities
   class IntegrationSyncExecutionEntity < Grape::Entity
@@ -595,6 +606,8 @@ module Entities
     expose :records_processed
     expose :records_failed
     expose :records_skipped
+    expose :duplicate_records
+    expose :duplicate_external_ids
     expose :error_message
     expose :metadata
     expose :created_at
@@ -644,6 +657,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/integration_sync_execution_summary_entity.rb
 module Entities
   class IntegrationSyncExecutionSummaryEntity < Grape::Entity
@@ -663,7 +677,8 @@ module Entities
         fetched: execution.records_fetched,
         processed: execution.records_processed,
         failed: execution.records_failed,
-        skipped: execution.records_skipped
+        skipped: execution.records_skipped,
+        duplicates: execution.duplicate_records || 0
       }
     end
     expose :status_badge do |execution, _options|
@@ -675,6 +690,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/marketplace_category_entity.rb
 module Entities
   class MarketplaceCategoryEntity < Grape::Entity
@@ -689,7 +705,7 @@ module Entities
                     .includes(:integration_features, :integration_auth_schema)
       Entities::MarketplaceProviderEntity.represent(
         providers,
-        include_category: false,  # Ya están dentro de una categoría
+        include_category: false,
         include_features: options[:include_features],
         include_auth_info: options[:include_auth_info],
         include_stats: options[:include_stats]
@@ -700,6 +716,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/marketplace_feature_entity.rb
 module Entities
   class MarketplaceFeatureEntity < Grape::Entity
@@ -708,8 +725,8 @@ module Entities
     expose :feature_description
   end
 end
-# app/api/entities/marketplace_provider_entity.rb
 
+# app/api/entities/marketplace_provider_entity.rb
 module Entities
   class MarketplaceProviderEntity < Grape::Entity
     FEATURE_ICONS = {
@@ -814,50 +831,7 @@ module Entities
     end
   end
 end
-# app/api/entities/raw_data_statistics_entity.rb
-module Entities
-  class RawDataStatisticsEntity < Grape::Entity
-    expose :period do |data|
-      data[:period]
-    end
 
-    expose :totals do |data|
-      data[:totals]
-    end
-
-    expose :rates do |data|
-      data[:rates]
-    end
-
-    expose :by_status do |data|
-      data[:by_status]
-    end
-
-    expose :by_feature do |data|
-      data[:by_feature]
-    end
-
-    expose :by_provider do |data|
-      data[:by_provider]
-    end
-
-    expose :error_breakdown do |data|
-      data[:error_breakdown]
-    end
-
-    expose :trends do |data|
-      data[:trends]
-    end
-
-    expose :health_score do |data|
-      data[:health_score]
-    end
-
-    expose :alerts do |data|
-      data[:alerts]
-    end
-  end
-end
 # app/api/entities/success_entity.rb
 module Entities
   class SuccessEntity < Grape::Entity
@@ -866,6 +840,7 @@ module Entities
     expose :data, if: ->(instance, _options) { instance.key?(:data) }
   end
 end
+
 # app/api/entities/sync_result_entity.rb
 module Entities
   class SyncResultEntity < Grape::Entity
@@ -890,20 +865,27 @@ module Entities
     end
   end
 end
+
 # app/api/entities/sync_schedule_options_entity.rb
 module Entities
   class SyncScheduleOptionsEntity < Grape::Entity
-    expose :frequencies do
+    expose :frequencies, :hours, :days_of_week, :days_of_month
+
+    private
+
+    def frequencies
       [
         { value: "daily", label: "Diaria" },
         { value: "weekly", label: "Semanal" },
         { value: "monthly", label: "Mensual" }
       ]
     end
-    expose :hours do
+
+    def hours
       (0..23).map { |h| { value: h, label: "#{h.to_s.rjust(2, '0')}:00" } }
     end
-    expose :days_of_week do
+
+    def days_of_week
       [
         { value: 0, label: "Domingo" },
         { value: 1, label: "Lunes" },
@@ -914,39 +896,12 @@ module Entities
         { value: 6, label: "Sábado" }
       ]
     end
-    expose :days_of_month do
+
+    def days_of_month
       [
         { value: "start", label: "Primer día del mes" },
         { value: "end", label: "Último día del mes" }
       ]
-    end
-  end
-end
-# app/api/entities/sync_statistics_entity.rb
-module Entities
-  class SyncStatisticsEntity < Grape::Entity
-    expose :total_executions
-    expose :completed_executions
-    expose :failed_executions
-    expose :running_executions
-    expose :total_raw_records
-    expose :pending_records
-    expose :normalized_records
-    expose :failed_records
-    expose :duplicate_records
-    expose :total_refuelings
-    expose :total_electric_charges
-    expose :last_sync_at
-    expose :next_sync_at
-    expose :success_rate do |stats, _options|
-      return 0 if stats[:total_executions].zero?
-      ((stats[:completed_executions].to_f / stats[:total_executions]) * 100).round(2)
-    end
-    expose :executions_by_feature do |stats, _options|
-      stats[:by_feature] || {}
-    end
-    expose :executions_by_status do |stats, _options|
-      stats[:by_status] || {}
     end
   end
 end
@@ -1313,6 +1268,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/vehicle_electric_charge_summary_entity.rb
 module Entities
   class VehicleElectricChargeSummaryEntity < Grape::Entity
@@ -1345,6 +1301,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/vehicle_entity.rb
 module Entities
   class VehicleEntity < Grape::Entity
@@ -1357,6 +1314,7 @@ module Entities
     expose :is_electric
   end
 end
+
 # app/api/entities/vehicle_provider_mapping_entity.rb
 module Entities
   class VehicleProviderMappingEntity < Grape::Entity
@@ -1392,6 +1350,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/vehicle_refueling_entity.rb
 module Entities
   class VehicleRefuelingEntity < Grape::Entity
@@ -1450,6 +1409,7 @@ module Entities
     end
   end
 end
+
 # app/api/entities/vehicle_refueling_summary_entity.rb
 module Entities
   class VehicleRefuelingSummaryEntity < Grape::Entity

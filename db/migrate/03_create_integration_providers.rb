@@ -3,7 +3,6 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
   def change
     create_table :integration_providers do |t|
       t.references :integration_category, null: false, foreign_key: true, index: true
-
       t.string :name, null: false, limit: 100
       t.string :slug, null: false, limit: 50
       t.string :api_base_url, limit: 500
@@ -14,7 +13,6 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
       t.boolean :is_premium, default: false, null: false
       t.integer :display_order, default: 999, null: false
       t.boolean :is_active, default: true, null: false
-
       t.timestamps
     end
 

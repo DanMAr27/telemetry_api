@@ -13,6 +13,8 @@ module Entities
     expose :records_processed
     expose :records_failed
     expose :records_skipped
+    expose :duplicate_records
+    expose :duplicate_external_ids
     expose :error_message
     expose :metadata
     expose :created_at

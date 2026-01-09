@@ -69,75 +69,15 @@ module V1
         end
       end
 
-      # TODO
-      # desc "Obtener estadísticas de raw data" do
-      #   detail "Calcula métricas agregadas de registros RAW"
-      # end
-      # params do
-      #   optional :tenant_id, type: Integer
-      #   optional :integration_id, type: Integer
-      #   optional :from_date, type: Date, default: -> { 30.days.ago.to_date }
-      #   optional :to_date, type: Date, default: -> { Date.current }
-      #   optional :group_by, type: String, values: %w[day hour status feature provider]
-      # end
-      # get "statistics" do
-      #   result = Integrations::RawData::StatisticsService.new(
-      #     filters: declared(params, include_missing: false)
-      #   ).call
-      #   if result.success?
-      #     present result.data, with: Entities::RawDataStatisticsEntity
-      #   else
-      #     error!({
-      #       error: "statistics_failed",
-      #       message: result.errors.join(", ")
-      #     }, 500)
-      #   end
-      # end
-
-      # TODO
-      # desc "Obtener timeline de procesamiento" do
-      #   detail "Muestra línea temporal del procesamiento de registros"
-      # end
-      # params do
-      #   optional :sync_execution_id, type: Integer
-      #   optional :integration_id, type: Integer
-      #   optional :from_time, type: DateTime
-      #   optional :to_time, type: DateTime
-      # end
-      # get "timeline" do
-      #   result = Integrations::RawData::TimelineService.new(
-      #     filters: declared(params, include_missing: false)
-      #   ).call
-
-      #   if result.success?
-      #     present result.data
-      #   else
-      #     error!({
-      #       error: "timeline_failed",
-      #       message: result.errors.join(", ")
-      #     }, 500)
-      #   end
-      # end
-
       desc "Obtener detalle completo de un registro" do
         detail "Retorna información detallada de un registro RAW específico"
         success Entities::IntegrationRawDataDetailEntity
       end
       params do
         requires :id, type: Integer, desc: "ID del registro"
-        optional :include_raw_data, type: Boolean, default: true
-        optional :include_execution, type: Boolean, default: true
-        optional :include_normalized, type: Boolean, default: true
-        optional :include_similar, type: Boolean, default: false,
-                 desc: "Incluir registros con errores similares"
-        optional :include_timeline, type: Boolean, default: true,
-                 desc: "Incluir línea temporal de eventos"
       end
       get ":id" do
-        result = Integrations::RawData::GetDetailService.new(
-          id: params[:id],
-          options: declared(params, include_missing: false)
-        ).call
+        result = Integrations::RawData::GetDetailService.new(id: params[:id]).call
 
         if result.success?
           present result.data, with: Entities::IntegrationRawDataDetailEntity

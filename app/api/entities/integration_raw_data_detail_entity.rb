@@ -139,30 +139,6 @@ module Entities
       end
       events.sort_by { |e| e[:timestamp] }
     end
-    expose :similar_records do |obj, opts|
-      next nil unless opts[:include_similar]
-      next nil unless obj.processing_status == "failed"
-      similar = IntegrationRawData
-        .where(tenant_integration_configuration_id: obj.tenant_integration_configuration_id)
-        .where(processing_status: "failed")
-        .where.not(id: obj.id)
-        .where("normalization_error LIKE ?", "%#{extract_key_error_part(obj.normalization_error)}%")
-        .limit(5)
-
-      {
-        count: similar.count,
-        records: similar.map do |rec|
-          {
-            id: rec.id,
-            external_id: rec.external_id,
-            status: rec.processing_status,
-            error: rec.normalization_error,
-            created_at: rec.created_at
-          }
-        end,
-        suggestion: build_similarity_suggestion(obj, similar)
-      }
-    end
     expose :available_actions do |obj, opts|
       Entities::IntegrationRawDataEntity.build_available_actions(obj, opts)
     end

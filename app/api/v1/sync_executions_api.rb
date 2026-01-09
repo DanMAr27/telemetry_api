@@ -48,7 +48,9 @@ module V1
         }
       end
 
-      desc "Estadísticas globales consolidadas de sincronizaciones"
+      desc "Estadísticas globales consolidadas de sincronizaciones" do
+        detail "Estadísticas globales de sincronizaciones"
+      end
       params do
         optional :tenant_id, type: Integer
         optional :integration_id, type: Integer
@@ -70,14 +72,131 @@ module V1
         present result.data
       end
 
+      desc "Sincronizar una feature específica" do
+        detail "Ejecuta sincronización manual para una feature. " \
+                "Crea una nueva ejecución que puede consultarse en /sync_executions"
+        success Entities::SyncResultEntity
+      end
+      params do
+        requires :integration_id, type: Integer, desc: "ID de la configuración de integración"
+        requires :feature_key,
+                  type: String,
+                  values: %w[fuel battery trips real_time_location odometer diagnostics],
+                  desc: "Feature a sincronizar"
+      end
+      post "sync-feature" do
+        config = TenantIntegrationConfiguration.find(params[:integration_id])
+
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        unless config.feature_enabled?(params[:feature_key])
+          error!({
+            error: "feature_not_enabled",
+            message: "La feature '#{params[:feature_key]}' no está habilitada",
+            enabled_features: config.enabled_features,
+            hint: "Habilita esta feature primero usando PUT /integrations/#{config.id}/features"
+          }, 422)
+        end
+
+        result = Integrations::Sync::SyncExecutionService.new(
+          config,
+          params[:feature_key],
+          manual: true
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::SyncResultEntity
+        else
+          error!({
+            error: "sync_error",
+            message: result.errors.join(", "),
+            execution_id: result.data&.dig(:execution_id)
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Configuración de integración no encontrada"
+        }, 404)
+      end
+
+      desc "Sincronizar todas las features habilitadas" do
+        detail "Ejecuta sincronización para cada feature activa en secuencia. " \
+                "Cada ejecución puede consultarse en /sync_executions"
+      end
+      params do
+        requires :integration_id, type: Integer,
+                 desc: "ID de la configuración de integración"
+      end
+      post "sync-all" do
+        config = TenantIntegrationConfiguration.find(params[:integration_id])
+
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        if config.enabled_features.empty?
+          error!({
+            error: "no_features_enabled",
+            message: "No hay features habilitadas para sincronizar",
+            hint: "Habilita features usando PUT /integrations/#{config.id}/features"
+          }, 422)
+        end
+
+        results = []
+
+        config.enabled_features.each do |feature_key|
+          result = Integrations::Sync::SyncExecutionService.new(
+            config,
+            feature_key,
+            manual: true
+          ).call
+
+          results << {
+            feature_key: feature_key,
+            success: result.success?,
+            execution_id: result.data&.dig(:execution_id),
+            message: result.success? ? result.message : result.errors.join(", "),
+            data: result.success? ? result.data : nil
+          }
+        end
+
+        {
+          integration_id: config.id,
+          provider_name: config.integration_provider.name,
+          total_features: results.count,
+          successful: results.count { |r| r[:success] },
+          failed: results.count { |r| !r[:success] },
+          results: results,
+          hint: "Consulta el detalle de cada ejecución en GET /sync_executions/:execution_id"
+        }
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Configuración de integración no encontrada"
+        }, 404)
+      end
+
       route_param :execution_id do
-        desc "Obtener detalle de una ejecución"
+        desc "Obtener detalle de una ejecución" do
+          detail "Detalle ejecución"
+        end
         get do
           execution = IntegrationSyncExecution.find(params[:execution_id])
           present execution, with: Entities::IntegrationSyncExecutionEntity
         end
 
-        desc "Reintentar ejecución fallida"
+        desc "Reintentar ejecución fallida" do
+          detail "Re-ejecutar sync (fetch + normalize)"
+        end
         post "retry" do
           execution = IntegrationSyncExecution.find(params[:execution_id])
 
@@ -94,30 +213,9 @@ module V1
           present result.data, with: Entities::SyncResultEntity
         end
 
-        desc "Raw data de esta ejecución"
-        params do
-          optional :status, type: String
-          optional :limit, type: Integer, default: 100
+        desc "Reprocesar registros fallidos de esta ejecución" do
+          detail "reintenta TODO lo que falló en esa ejecución (bulk)"
         end
-        get "raw-data" do
-          execution = IntegrationSyncExecution.find(params[:execution_id])
-          raw_data = execution.integration_raw_data
-
-          raw_data = raw_data.where(processing_status: params[:status]) if params[:status]
-          raw_data = raw_data.limit(params[:limit])
-
-          present raw_data, with: Entities::IntegrationRawDataEntity
-        end
-
-        desc "Errores de normalización"
-        get "errors" do
-          execution = IntegrationSyncExecution.find(params[:execution_id])
-          errors = execution.integration_raw_data.failed
-
-          present errors, with: Entities::IntegrationRawDataEntity
-        end
-
-        desc "Reprocesar registros fallidos de esta ejecución"
         post "reprocess" do
           execution = IntegrationSyncExecution.find(params[:execution_id])
 

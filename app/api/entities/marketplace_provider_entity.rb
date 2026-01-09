@@ -1,5 +1,4 @@
 # app/api/entities/marketplace_provider_entity.rb
-
 module Entities
   class MarketplaceProviderEntity < Grape::Entity
     FEATURE_ICONS = {

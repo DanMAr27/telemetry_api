@@ -439,8 +439,12 @@ class IntegrationRawData < ApplicationRecord
 
     # Crear o manejar duplicado (mejorado)
     def create_or_handle_duplicate(attributes)
+      # Extraer IDs de forma segura (pueden venir como objetos ActiveRecord o como IDs directos)
+      config_id = attributes[:tenant_integration_configuration]&.id ||
+                  attributes[:tenant_integration_configuration_id]
+
       existing = find_by(
-        tenant_integration_configuration_id: attributes[:tenant_integration_configuration_id],
+        tenant_integration_configuration_id: config_id,
         external_id: attributes[:external_id],
         feature_key: attributes[:feature_key]
       )
@@ -467,13 +471,19 @@ class IntegrationRawData < ApplicationRecord
             existing
           end
         else
-          # Verdadero duplicado sin cambios
-          existing.mark_as_duplicate! unless existing.duplicate?
-          existing
+          # Verdadero duplicado sin cambios → NO crear registro, devolver nil
+          Rails.logger.debug("  ⊘ Duplicado idéntico detectado: #{attributes[:external_id]}")
+          nil
         end
       else
         # No existe, crear nuevo
-        create!(attributes)
+        begin
+          create!(attributes)
+        rescue ActiveRecord::RecordNotUnique
+          # Race condition: otro proceso lo creó justo ahora
+          Rails.logger.debug("  ⊘ Duplicado por race condition: #{attributes[:external_id]}")
+          nil
+        end
       end
     end
 
@@ -585,7 +595,7 @@ class IntegrationSyncExecution < ApplicationRecord
 
   # Verificar si hubo duplicados
   def has_duplicates?
-    records_skipped > 0
+    (duplicate_records || 0) > 0
   end
 
   # Resumen de la ejecución
@@ -600,7 +610,8 @@ class IntegrationSyncExecution < ApplicationRecord
         fetched: records_fetched,
         processed: records_processed,
         failed: records_failed,
-        skipped: records_skipped
+        skipped: records_skipped,
+        duplicates: duplicate_records || 0
       }
     }
   end
@@ -832,7 +843,6 @@ class TenantIntegrationConfiguration < ApplicationRecord
     end
   end
 end
-
 # app/models/tenant.rb
 class Tenant < ApplicationRecord
   has_many :tenant_integration_configurations, dependent: :destroy
@@ -1016,7 +1026,6 @@ class Tenant < ApplicationRecord
     self.email = email&.strip&.downcase
   end
 end
-
 # app/models/vehicle_electric_charge.rb
 class VehicleElectricCharge < ApplicationRecord
   belongs_to :tenant
@@ -1103,7 +1112,6 @@ class VehicleElectricCharge < ApplicationRecord
     end_soc_percent && end_soc_percent >= 95
   end
 
-  # Coordenadas como array [lat, lng]
   def coordinates
     return nil unless has_location?
     [ location_lat, location_lng ]
@@ -1140,7 +1148,6 @@ class VehicleElectricCharge < ApplicationRecord
       )
   end
 end
-
 # app/models/vehicle_provider_mapping.rb
 class VehicleProviderMapping < ApplicationRecord
   belongs_to :vehicle
@@ -1210,7 +1217,6 @@ class VehicleProviderMapping < ApplicationRecord
     self.mapped_at ||= Time.current
   end
 end
-
 # app/models/vehicle_refueling.rb
 class VehicleRefueling < ApplicationRecord
   belongs_to :tenant
@@ -1307,7 +1313,6 @@ class VehicleRefueling < ApplicationRecord
       )
   end
 end
-
 # app/models/vehicle.rb
 class Vehicle < ApplicationRecord
   belongs_to :tenant

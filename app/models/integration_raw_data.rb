@@ -287,8 +287,12 @@ class IntegrationRawData < ApplicationRecord
 
     # Crear o manejar duplicado (mejorado)
     def create_or_handle_duplicate(attributes)
+      # Extraer IDs de forma segura (pueden venir como objetos ActiveRecord o como IDs directos)
+      config_id = attributes[:tenant_integration_configuration]&.id ||
+                  attributes[:tenant_integration_configuration_id]
+
       existing = find_by(
-        tenant_integration_configuration_id: attributes[:tenant_integration_configuration_id],
+        tenant_integration_configuration_id: config_id,
         external_id: attributes[:external_id],
         feature_key: attributes[:feature_key]
       )
@@ -315,13 +319,19 @@ class IntegrationRawData < ApplicationRecord
             existing
           end
         else
-          # Verdadero duplicado sin cambios
-          existing.mark_as_duplicate! unless existing.duplicate?
-          existing
+          # Verdadero duplicado sin cambios → NO crear registro, devolver nil
+          Rails.logger.debug("  ⊘ Duplicado idéntico detectado: #{attributes[:external_id]}")
+          nil
         end
       else
         # No existe, crear nuevo
-        create!(attributes)
+        begin
+          create!(attributes)
+        rescue ActiveRecord::RecordNotUnique
+          # Race condition: otro proceso lo creó justo ahora
+          Rails.logger.debug("  ⊘ Duplicado por race condition: #{attributes[:external_id]}")
+          nil
+        end
       end
     end
 

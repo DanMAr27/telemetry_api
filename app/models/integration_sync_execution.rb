@@ -92,7 +92,7 @@ class IntegrationSyncExecution < ApplicationRecord
 
   # Verificar si hubo duplicados
   def has_duplicates?
-    records_skipped > 0
+    (duplicate_records || 0) > 0
   end
 
   # Resumen de la ejecución
@@ -107,7 +107,8 @@ class IntegrationSyncExecution < ApplicationRecord
         fetched: records_fetched,
         processed: records_processed,
         failed: records_failed,
-        skipped: records_skipped
+        skipped: records_skipped,
+        duplicates: duplicate_records || 0
       }
     }
   end

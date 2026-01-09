@@ -113,7 +113,7 @@ module V1
         detail "Retorna las opciones válidas para configurar la frecuencia de sincronización"
       end
       get "schedule-options" do
-        present({}, with: Entities::SyncScheduleOptionsEntity)
+        present OpenStruct.new, with: Entities::SyncScheduleOptionsEntity
       end
 
       route_param :id do
@@ -192,7 +192,6 @@ module V1
             }, 422)
           end
         end
-
 
         desc "Actualizar solo las credenciales de autenticación" do
           detail "Actualiza únicamente las credenciales sin tocar otros campos"
@@ -374,105 +373,10 @@ module V1
             }, 422)
           end
         end
-
-        desc "Sincronizar una feature específica" do
-          detail "Ejecuta sincronización manual para una feature. " \
-                 "Crea una nueva ejecución que puede consultarse en /sync_executions"
-          success Entities::SyncResultEntity
-        end
-        params do
-          requires :feature_key,
-                   type: String,
-                   values: %w[fuel battery trips real_time_location odometer diagnostics],
-                   desc: "Feature a sincronizar"
-        end
-        post "sync" do
-          unless @config.is_active
-            error!({
-              error: "inactive_configuration",
-              message: "La configuración debe estar activa para sincronizar"
-            }, 422)
-          end
-
-          unless @config.feature_enabled?(params[:feature_key])
-            error!({
-              error: "feature_not_enabled",
-              message: "La feature '#{params[:feature_key]}' no está habilitada",
-              enabled_features: @config.enabled_features,
-              hint: "Habilita esta feature primero usando PUT /integrations/#{@config.id}/features"
-            }, 422)
-          end
-
-          result = Integrations::Sync::SyncExecutionService.new(
-            @config,
-            params[:feature_key],
-            manual: true
-          ).call
-
-          if result.success?
-            present result.data, with: Entities::SyncResultEntity
-          else
-            error!({
-              error: "sync_error",
-              message: result.errors.join(", "),
-              execution_id: result.data&.dig(:execution_id)
-            }, 422)
-          end
-        end
-
-        desc "Sincronizar todas las features habilitadas" do
-          detail "Ejecuta sincronización para cada feature activa en secuencia. " \
-                 "Cada ejecución puede consultarse en /sync_executions"
-        end
-        post "sync-all" do
-          unless @config.is_active
-            error!({
-              error: "inactive_configuration",
-              message: "La configuración debe estar activa para sincronizar"
-            }, 422)
-          end
-
-          if @config.enabled_features.empty?
-            error!({
-              error: "no_features_enabled",
-              message: "No hay features habilitadas para sincronizar",
-              hint: "Habilita features usando PUT /integrations/#{@config.id}/features"
-            }, 422)
-          end
-
-          results = []
-
-          @config.enabled_features.each do |feature_key|
-            result = Integrations::Sync::SyncExecutionService.new(
-              @config,
-              feature_key,
-              manual: true
-            ).call
-
-            results << {
-              feature_key: feature_key,
-              success: result.success?,
-              execution_id: result.data&.dig(:execution_id),
-              message: result.success? ? result.message : result.errors.join(", "),
-              data: result.success? ? result.data : nil
-            }
-          end
-
-          {
-            integration_id: @config.id,
-            provider_name: @config.integration_provider.name,
-            total_features: results.count,
-            successful: results.count { |r| r[:success] },
-            failed: results.count { |r| !r[:success] },
-            results: results,
-            hint: "Consulta el detalle de cada ejecución en GET /sync_executions/:execution_id"
-          }
-        end
       end
     end
   end
 end
-
 
 # app/api/v1/marketplace.rb
 module V1
@@ -487,11 +391,9 @@ module V1
         optional :provider_status, type: String, values: %w[active beta coming_soon]
         optional :is_premium, type: Boolean
         optional :search, type: String
-
-        # Opciones de inclusión
         optional :include_features, type: Boolean, default: true
         optional :include_auth_info, type: Boolean, default: false
-        optional :include_category, type: Boolean, default: false  # ✅ Añadido
+        optional :include_category, type: Boolean, default: false
         optional :include_stats, type: Boolean, default: false
       end
       get do
@@ -508,7 +410,6 @@ module V1
         ).call
 
         if result.success?
-          # ✅ Pasar opciones a las entities
           entity_options = {
             include_features: params[:include_features],
             include_auth_info: params[:include_auth_info],
@@ -520,7 +421,7 @@ module V1
           when "grouped"
             present result.data[:categories],
                     with: Entities::MarketplaceCategoryEntity,
-                    **entity_options  # ✅ Spread operator para pasar opciones
+                    **entity_options
 
           when "flat"
             present result.data[:providers],
@@ -546,7 +447,7 @@ module V1
         optional :include_category, type: Boolean, default: true
         optional :include_features, type: Boolean, default: true
         optional :include_auth_info, type: Boolean, default: true
-        optional :include_stats, type: Boolean, default: true  # ✅ Añadido
+        optional :include_stats, type: Boolean, default: true
       end
       get "providers/:slug" do
         provider = IntegrationProvider
@@ -554,7 +455,6 @@ module V1
           .includes(:integration_category, :integration_features, :integration_auth_schema)
           .find_by!(slug: params[:slug])
 
-        # ✅ Pasar todas las opciones
         present provider,
                 with: Entities::MarketplaceProviderEntity,
                 include_category: params[:include_category],
@@ -693,32 +593,47 @@ end
 module V1
   class RawDataApi < Grape::API
     resource :raw_data do
-      desc "Listar registros de raw data con filtros avanzados"
+      desc "Listar registros de raw data con filtros avanzados" do
+        detail "Retorna lista paginada de registros RAW con múltiples filtros"
+        success Entities::IntegrationRawDataEntity
+      end
       params do
-        optional :tenant_id, type: Integer
-        optional :integration_id, type: Integer
-        optional :feature_key, type: String
-        optional :provider_slug, type: String
-        optional :external_id, type: String
-        optional :status, type: String, values: %w[pending normalized failed duplicate skipped]
-        optional :status_in, type: Array[String]
-        optional :from_date, type: Date
-        optional :to_date, type: Date
-        optional :created_after, type: DateTime
-        optional :created_before, type: DateTime
-        optional :sync_execution_id, type: Integer
-        optional :only_latest_sync, type: Boolean, default: false
-        optional :has_error, type: Boolean
-        optional :error_contains, type: String
-        optional :retriable, type: Boolean
-        optional :sort_by, type: String, values: %w[created_at normalized_at external_id id], default: "created_at"
-        optional :sort_order, type: String, values: %w[asc desc], default: "desc"
-        optional :page, type: Integer, default: 1
-        optional :per_page, type: Integer, default: 50
-        optional :include_raw_data, type: Boolean, default: false
-        optional :include_execution, type: Boolean, default: false
-        optional :include_normalized, type: Boolean, default: false
-        optional :include_metadata, type: Boolean, default: true
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :integration_id, type: Integer, desc: "Filtrar por configuración de integración"
+        optional :feature_key, type: String, desc: "Filtrar por feature (fuel, battery, trips)"
+        optional :provider_slug, type: String, desc: "Filtrar por proveedor"
+        optional :external_id, type: String, desc: "Filtrar por ID externo"
+        optional :status, type: String,
+                 values: %w[pending normalized failed duplicate skipped],
+                 desc: "Filtrar por estado de procesamiento"
+        optional :status_in, type: Array[String], desc: "Filtrar por múltiples estados"
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+        optional :created_after, type: DateTime, desc: "Creados después de"
+        optional :created_before, type: DateTime, desc: "Creados antes de"
+        optional :sync_execution_id, type: Integer, desc: "Filtrar por ejecución de sync"
+        optional :only_latest_sync, type: Boolean, default: false,
+                 desc: "Solo registros de la última sincronización"
+        optional :has_error, type: Boolean, desc: "Filtrar por presencia de error"
+        optional :error_contains, type: String, desc: "Buscar en mensaje de error"
+        optional :retriable, type: Boolean, desc: "Solo errores recuperables"
+        optional :sort_by, type: String,
+                 values: %w[created_at normalized_at external_id id],
+                 default: "created_at",
+                 desc: "Campo para ordenar"
+        optional :sort_order, type: String, values: %w[asc desc], default: "desc",
+                 desc: "Dirección del ordenamiento"
+        optional :page, type: Integer, default: 1, desc: "Número de página"
+        optional :per_page, type: Integer, default: 50, values: 1..500,
+                 desc: "Registros por página"
+        optional :include_raw_data, type: Boolean, default: false,
+                 desc: "Incluir JSON completo del proveedor"
+        optional :include_execution, type: Boolean, default: false,
+                 desc: "Incluir datos de la ejecución de sync"
+        optional :include_normalized, type: Boolean, default: false,
+                 desc: "Incluir registro normalizado relacionado"
+        optional :include_metadata, type: Boolean, default: true,
+                 desc: "Incluir metadata adicional"
       end
       get do
         result = Integrations::RawData::ListService.new(
@@ -738,211 +653,189 @@ module V1
             pagination: result.data[:pagination]
           }
         else
-          error!({ error: "list_failed", message: result.errors.join(", ") }, 500)
+          error!({
+            error: "list_failed",
+            message: result.errors.join(", ")
+          }, 500)
         end
       end
 
-      desc "Obtener timeline de procesamiento"
+      desc "Obtener detalle completo de un registro" do
+        detail "Retorna información detallada de un registro RAW específico"
+        success Entities::IntegrationRawDataDetailEntity
+      end
       params do
-        optional :sync_execution_id, type: Integer
-        optional :integration_id, type: Integer
-        optional :from_time, type: DateTime
-        optional :to_time, type: DateTime
+        requires :id, type: Integer, desc: "ID del registro"
       end
-      get "timeline" do
-        result = Integrations::RawData::TimelineService.new(
-          filters: declared(params, include_missing: false)
-        ).call
-
-        present result.data if result.success?
-      end
-
-      desc "Listar solo registros con errores"
-      params do
-        optional :integration_id, type: Integer
-        optional :feature_key, type: String
-        optional :only_retriable, type: Boolean
-        optional :page, type: Integer, default: 1
-        optional :per_page, type: Integer, default: 50
-      end
-      get "errors" do
-        filter_params = declared(params, include_missing: false).merge(status: "failed")
-
-        result = Integrations::RawData::ListService.new(filters: filter_params).call
+      get ":id" do
+        result = Integrations::RawData::GetDetailService.new(id: params[:id]).call
 
         if result.success?
-          {
-            errors: Entities::IntegrationRawDataEntity.represent(
-              result.data[:raw_data],
-              include_actions: true,
-              error_focus: true
-            ),
-            summary: result.data[:summary],
-            pagination: result.data[:pagination],
-            hint: "Para estadísticas detalladas use GET /sync_executions/statistics"
-          }
+          present result.data, with: Entities::IntegrationRawDataDetailEntity
+        else
+          error!({
+            error: "not_found",
+            message: result.errors.join(", ")
+          }, 404)
         end
       end
 
-      desc "Ejecutar acciones en lote"
+      desc "Reintentar normalización de uno o más registros" do
+        detail "Vuelve a intentar normalizar registros que fallaron previamente"
+      end
       params do
-        requires :action, type: String, values: %w[retry skip reset delete]
-        optional :ids, type: Array[Integer]
-        optional :filters, type: Hash
-        optional :reason, type: String
-        optional :notes, type: String
-        optional :confirm, type: Boolean, default: false
-        optional :max_records, type: Integer, default: 1000
+        requires :ids, type: Array[Integer],
+                 desc: "IDs de registros a reintentar (mínimo 1, máximo 1000)"
+        optional :notes, type: String, desc: "Notas adicionales sobre el reintento"
       end
-      post "bulk-actions" do
-        if params[:action] == "delete" && !params[:confirm]
-          error!({ error: "confirmation_required", message: "Confirme con confirm: true" }, 422)
-        end
-
-        if params[:action] == "skip" && params[:reason].blank?
-          error!({ error: "reason_required", message: "Proporcione un motivo" }, 422)
-        end
-
-        result = Integrations::RawData::BulkActionsService.new(
-          action: params[:action],
+      post "retry" do
+        result = Integrations::RawData::RetryService.new(
           ids: params[:ids],
-          filters: params[:filters],
-          reason: params[:reason],
-          notes: params[:notes],
-          max_records: params[:max_records]
+          notes: params[:notes]
         ).call
 
         if result.success?
           {
             success: true,
-            action: params[:action],
-            summary: result.data[:summary],
+            action: "retry",
+            summary: {
+              total: result.data[:total],
+              successful: result.data[:successful],
+              failed: result.data[:failed]
+            },
             results: result.data[:results],
             duration_seconds: result.data[:duration_seconds],
-            message: result.data[:message]
+            message: result.message
           }
         else
-          error!({ error: "bulk_action_failed", message: result.errors.join(", ") }, 422)
+          error!({
+            error: "retry_failed",
+            message: result.errors.join(", ")
+          }, 422)
         end
       end
 
-      route_param :id do
-        desc "Obtener detalle completo"
-        params do
-          optional :include_raw_data, type: Boolean, default: true
-          optional :include_execution, type: Boolean, default: true
-          optional :include_normalized, type: Boolean, default: true
-          optional :include_similar, type: Boolean, default: false
-          optional :include_timeline, type: Boolean, default: true
-        end
-        get do
-          result = Integrations::RawData::GetDetailService.new(
-            id: params[:id],
-            options: declared(params, include_missing: false)
-          ).call
+      desc "Omitir uno o más registros" do
+        detail "Marca registros como omitidos (skipped) con un motivo específico"
+      end
+      params do
+        requires :ids, type: Array[Integer],
+                 desc: "IDs de registros a omitir"
+        requires :reason, type: String,
+                 desc: "Motivo obligatorio de la omisión"
+        optional :notes, type: String,
+                 desc: "Notas adicionales"
+      end
+      post "skip" do
+        result = Integrations::RawData::SkipService.new(
+          ids: params[:ids],
+          reason: params[:reason],
+          notes: params[:notes]
+        ).call
 
-          if result.success?
-            present result.data, with: Entities::IntegrationRawDataDetailEntity
-          else
-            error!({ error: "not_found", message: result.errors.join(", ") }, 404)
-          end
-        end
-
-        desc "Reintentar normalización"
-        post "retry" do
-          result = Integrations::RawData::RetryService.new(id: params[:id]).call
-
+        if result.success?
           {
-            success: result.success?,
-            raw_data_id: params[:id],
-            previous_status: result.data[:previous_status],
-            new_status: result.data[:new_status],
-            retry_count: result.data[:retry_count],
-            normalized_record: result.data[:normalized_record],
-            processing_time_ms: result.data[:processing_time_ms],
-            message: result.data[:message],
-            error: result.success? ? nil : result.errors.join(", "),
-            next_steps: result.data[:next_steps]
+            success: true,
+            action: "skip",
+            summary: {
+              total: result.data[:total],
+              successful: result.data[:successful],
+              failed: result.data[:failed]
+            },
+            results: result.data[:results],
+            duration_seconds: result.data[:duration_seconds],
+            message: result.message
           }
+        else
+          error!({
+            error: "skip_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+      desc "Resetear uno o más registros a estado pending" do
+        detail "Devuelve registros al estado pending para que sean reprocesados"
+      end
+      params do
+        requires :ids, type: Array[Integer],
+                 desc: "IDs de registros a resetear"
+        optional :notes, type: String,
+                 desc: "Notas sobre el motivo del reset"
+      end
+      post "reset" do
+        result = Integrations::RawData::ResetService.new(
+          ids: params[:ids],
+          notes: params[:notes]
+        ).call
+
+        if result.success?
+          {
+            success: true,
+            action: "reset",
+            summary: {
+              total: result.data[:total],
+              successful: result.data[:successful],
+              failed: result.data[:failed]
+            },
+            results: result.data[:results],
+            duration_seconds: result.data[:duration_seconds],
+            message: result.message
+          }
+        else
+          error!({
+            error: "reset_failed",
+            message: result.errors.join(", ")
+          }, 422)
+        end
+      end
+
+      desc "Eliminar uno o más registros" do
+        detail "Elimina permanentemente registros RAW (requiere confirmación)"
+      end
+      params do
+        requires :ids, type: Array[Integer],
+                 desc: "IDs de registros a eliminar"
+        requires :reason, type: String,
+                 desc: "Motivo obligatorio de la eliminación"
+        optional :notes, type: String,
+                 desc: "Notas adicionales"
+        requires :confirm, type: Boolean,
+                 desc: "Confirmación explícita (debe ser true)"
+      end
+      post "delete" do
+        unless params[:confirm]
+          error!({
+            error: "confirmation_required",
+            message: "Debe confirmar la eliminación con confirm: true"
+          }, 422)
         end
 
-        desc "Marcar como omitido"
-        params do
-          requires :reason, type: String
-          optional :notes, type: String
-        end
-        post "skip" do
-          result = Integrations::RawData::SkipService.new(
-            id: params[:id],
-            reason: params[:reason],
-            notes: params[:notes]
-          ).call
+        result = Integrations::RawData::DeleteService.new(
+          ids: params[:ids],
+          reason: params[:reason],
+          notes: params[:notes],
+          confirm: params[:confirm]
+        ).call
 
-          if result.success?
-            {
-              success: true,
-              raw_data_id: params[:id],
-              previous_status: result.data[:previous_status],
-              new_status: "skipped",
-              skip_info: result.data[:skip_info],
-              message: result.data[:message]
-            }
-          else
-            error!({ error: "skip_failed", message: result.errors.join(", ") }, 422)
-          end
-        end
-
-        desc "Resetear a pending"
-        params do
-          optional :notes, type: String
-        end
-        post "reset" do
-          result = Integrations::RawData::ResetService.new(
-            id: params[:id],
-            notes: params[:notes]
-          ).call
-
-          if result.success?
-            {
-              success: true,
-              raw_data_id: params[:id],
-              previous_status: result.data[:previous_status],
-              new_status: "pending",
-              metadata: result.data[:metadata],
-              next_processing: result.data[:next_processing],
-              message: result.data[:message]
-            }
-          else
-            error!({ error: "reset_failed", message: result.errors.join(", ") }, 422)
-          end
-        end
-
-        desc "Eliminar registro"
-        params do
-          requires :reason, type: String
-          optional :confirm, type: Boolean, default: false
-        end
-        delete do
-          unless params[:confirm]
-            error!({ error: "confirmation_required", message: "Confirme con confirm: true" }, 422)
-          end
-
-          result = Integrations::RawData::DeleteService.new(
-            id: params[:id],
-            reason: params[:reason]
-          ).call
-
-          if result.success?
-            {
-              success: true,
-              raw_data_id: params[:id],
-              deleted_at: result.data[:deleted_at],
-              reason: params[:reason],
-              message: "Registro eliminado correctamente"
-            }
-          else
-            error!({ error: "delete_failed", message: result.errors.join(", ") }, 422)
-          end
+        if result.success?
+          {
+            success: true,
+            action: "delete",
+            summary: {
+              total: result.data[:total],
+              successful: result.data[:successful],
+              failed: result.data[:failed]
+            },
+            results: result.data[:results],
+            duration_seconds: result.data[:duration_seconds],
+            message: result.message
+          }
+        else
+          error!({
+            error: "delete_failed",
+            message: result.errors.join(", ")
+          }, 422)
         end
       end
     end
@@ -999,7 +892,9 @@ module V1
         }
       end
 
-      desc "Estadísticas globales consolidadas de sincronizaciones"
+      desc "Estadísticas globales consolidadas de sincronizaciones" do
+        detail "Estadísticas globales de sincronizaciones"
+      end
       params do
         optional :tenant_id, type: Integer
         optional :integration_id, type: Integer
@@ -1021,14 +916,131 @@ module V1
         present result.data
       end
 
+      desc "Sincronizar una feature específica" do
+        detail "Ejecuta sincronización manual para una feature. " \
+                "Crea una nueva ejecución que puede consultarse en /sync_executions"
+        success Entities::SyncResultEntity
+      end
+      params do
+        requires :integration_id, type: Integer, desc: "ID de la configuración de integración"
+        requires :feature_key,
+                  type: String,
+                  values: %w[fuel battery trips real_time_location odometer diagnostics],
+                  desc: "Feature a sincronizar"
+      end
+      post "sync-feature" do
+        config = TenantIntegrationConfiguration.find(params[:integration_id])
+
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        unless config.feature_enabled?(params[:feature_key])
+          error!({
+            error: "feature_not_enabled",
+            message: "La feature '#{params[:feature_key]}' no está habilitada",
+            enabled_features: config.enabled_features,
+            hint: "Habilita esta feature primero usando PUT /integrations/#{config.id}/features"
+          }, 422)
+        end
+
+        result = Integrations::Sync::SyncExecutionService.new(
+          config,
+          params[:feature_key],
+          manual: true
+        ).call
+
+        if result.success?
+          present result.data, with: Entities::SyncResultEntity
+        else
+          error!({
+            error: "sync_error",
+            message: result.errors.join(", "),
+            execution_id: result.data&.dig(:execution_id)
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Configuración de integración no encontrada"
+        }, 404)
+      end
+
+      desc "Sincronizar todas las features habilitadas" do
+        detail "Ejecuta sincronización para cada feature activa en secuencia. " \
+                "Cada ejecución puede consultarse en /sync_executions"
+      end
+      params do
+        requires :integration_id, type: Integer,
+                 desc: "ID de la configuración de integración"
+      end
+      post "sync-all" do
+        config = TenantIntegrationConfiguration.find(params[:integration_id])
+
+        unless config.is_active
+          error!({
+            error: "inactive_configuration",
+            message: "La configuración debe estar activa para sincronizar"
+          }, 422)
+        end
+
+        if config.enabled_features.empty?
+          error!({
+            error: "no_features_enabled",
+            message: "No hay features habilitadas para sincronizar",
+            hint: "Habilita features usando PUT /integrations/#{config.id}/features"
+          }, 422)
+        end
+
+        results = []
+
+        config.enabled_features.each do |feature_key|
+          result = Integrations::Sync::SyncExecutionService.new(
+            config,
+            feature_key,
+            manual: true
+          ).call
+
+          results << {
+            feature_key: feature_key,
+            success: result.success?,
+            execution_id: result.data&.dig(:execution_id),
+            message: result.success? ? result.message : result.errors.join(", "),
+            data: result.success? ? result.data : nil
+          }
+        end
+
+        {
+          integration_id: config.id,
+          provider_name: config.integration_provider.name,
+          total_features: results.count,
+          successful: results.count { |r| r[:success] },
+          failed: results.count { |r| !r[:success] },
+          results: results,
+          hint: "Consulta el detalle de cada ejecución en GET /sync_executions/:execution_id"
+        }
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Configuración de integración no encontrada"
+        }, 404)
+      end
+
       route_param :execution_id do
-        desc "Obtener detalle de una ejecución"
+        desc "Obtener detalle de una ejecución" do
+          detail "Detalle ejecución"
+        end
         get do
           execution = IntegrationSyncExecution.find(params[:execution_id])
           present execution, with: Entities::IntegrationSyncExecutionEntity
         end
 
-        desc "Reintentar ejecución fallida"
+        desc "Reintentar ejecución fallida" do
+          detail "Re-ejecutar sync (fetch + normalize)"
+        end
         post "retry" do
           execution = IntegrationSyncExecution.find(params[:execution_id])
 
@@ -1045,30 +1057,9 @@ module V1
           present result.data, with: Entities::SyncResultEntity
         end
 
-        desc "Raw data de esta ejecución"
-        params do
-          optional :status, type: String
-          optional :limit, type: Integer, default: 100
+        desc "Reprocesar registros fallidos de esta ejecución" do
+          detail "reintenta TODO lo que falló en esa ejecución (bulk)"
         end
-        get "raw-data" do
-          execution = IntegrationSyncExecution.find(params[:execution_id])
-          raw_data = execution.integration_raw_data
-
-          raw_data = raw_data.where(processing_status: params[:status]) if params[:status]
-          raw_data = raw_data.limit(params[:limit])
-
-          present raw_data, with: Entities::IntegrationRawDataEntity
-        end
-
-        desc "Errores de normalización"
-        get "errors" do
-          execution = IntegrationSyncExecution.find(params[:execution_id])
-          errors = execution.integration_raw_data.failed
-
-          present errors, with: Entities::IntegrationRawDataEntity
-        end
-
-        desc "Reprocesar registros fallidos de esta ejecución"
         post "reprocess" do
           execution = IntegrationSyncExecution.find(params[:execution_id])
 
@@ -1370,6 +1361,7 @@ module V1
     end
   end
 end
+
 # app/api/v1/vehicle_electric_charges.rb
 module V1
   class VehicleElectricChargesApi < Grape::API
@@ -1473,7 +1465,6 @@ module V1
     end
   end
 end
-
 # app/api/v1/vehicle_mappings_api.rb
 module V1
   class VehicleProviderMappingsApi < Grape::API
@@ -1662,7 +1653,6 @@ module V1
     end
   end
 end
-
 # app/api/v1/vehicle_refuelings.rb
 module V1
   class VehicleRefuelingsApi < Grape::API
@@ -1743,8 +1733,108 @@ module V1
       end
       get "statistics" do
         refuelings = VehicleRefueling.all
+        refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
 
-        # Aplicar filtros
+        if params[:from_date] && params[:to_date]
+          refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+        end
+
+        {
+          total_refuelings: refuelings.count,
+          total_liters: refuelings.total_volume,
+          total_cost: refuelings.total_cost,
+          average_liters_per_refueling: refuelings.average_volume,
+          by_fuel_type: refuelings.count_by_fuel_type,
+          period: {
+            from: params[:from_date] || refuelings.minimum(:refueling_date),
+            to: params[:to_date] || refuelings.maximum(:refueling_date)
+          }
+        }
+      end
+    end
+  end
+end
+# app/api/v1/vehicle_refuelings.rb
+module V1
+  class VehicleRefuelingsApi < Grape::API
+    resource :refuelings, desc: "Repostajes de combustible" do
+      desc "Listar todos los repostajes" do
+        detail "Retorna repostajes de combustible con filtros opcionales"
+        success Entities::VehicleRefuelingSummaryEntity
+      end
+      params do
+        optional :vehicle_id, type: Integer, desc: "Filtrar por vehículo"
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+        optional :from_date, type: Date, desc: "Fecha desde"
+        optional :to_date, type: Date, desc: "Fecha hasta"
+        optional :fuel_type, type: String, desc: "Filtrar por tipo de combustible"
+        optional :limit, type: Integer, default: 100, values: 1..500
+        optional :page, type: Integer, default: 1
+        optional :per_page, type: Integer, default: 100, values: 1..500
+      end
+      get do
+        refuelings = VehicleRefueling
+          .includes(:vehicle, :tenant)
+          .recent
+
+        refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
+        refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
+        refuelings = refuelings.by_fuel_type(params[:fuel_type]) if params[:fuel_type]
+
+        if params[:from_date] && params[:to_date]
+          refuelings = refuelings.between_dates(params[:from_date], params[:to_date])
+        end
+
+          total = refuelings.count
+
+        refuelings = refuelings
+          .offset((params[:page] - 1) * params[:per_page])
+          .limit(params[:per_page])
+
+        {
+          refuelings: Entities::VehicleRefuelingSummaryEntity.represent(refuelings),
+          pagination: {
+            current_page: params[:page],
+            per_page: params[:per_page],
+            total_items: total,
+            total_pages: (total.to_f / params[:per_page]).ceil
+          }
+        }
+      end
+
+      desc "Obtener detalle de un repostaje" do
+        success Entities::VehicleRefuelingEntity
+      end
+      params do
+        requires :id, type: Integer
+      end
+      get ":id" do
+        refueling = VehicleRefueling.find(params[:id])
+
+        present refueling,
+                with: Entities::VehicleRefuelingEntity,
+                include_computed: true,
+                include_vehicle: true,
+                include_raw_data: true
+      rescue ActiveRecord::RecordNotFound
+        error!({
+          error: "not_found",
+          message: "Repostaje no encontrado"
+        }, 404)
+      end
+
+      desc "Obtener estadísticas de repostajes" do
+        detail "Retorna estadísticas agregadas de repostajes"
+      end
+      params do
+        optional :vehicle_id, type: Integer
+        optional :tenant_id, type: Integer
+        optional :from_date, type: Date
+        optional :to_date, type: Date
+      end
+      get "statistics" do
+        refuelings = VehicleRefueling.all
         refuelings = refuelings.by_vehicle(params[:vehicle_id]) if params[:vehicle_id]
         refuelings = refuelings.by_tenant(params[:tenant_id]) if params[:tenant_id]
 
@@ -1912,6 +2002,30 @@ module V1
           statuses: Vehicle.statuses.map { |status|
             { value: status, label: status.humanize }
           }
+        }
+      end
+
+      desc "Obtener resumen de la flota de vehículos" do
+        detail "Retorna estadísticas agregadas de todos los vehículos"
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
+      end
+      get "summary" do
+        vehicles = Vehicle.all
+        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+
+        {
+          total_vehicles: vehicles.count,
+          by_status: vehicles.group(:status).count,
+          by_fuel_type: vehicles.group(:fuel_type).count,
+          by_vehicle_type: vehicles.group(:vehicle_type).count,
+          electric_vehicles: vehicles.electric.count,
+          combustion_vehicles: vehicles.combustion.count,
+          with_telemetry: vehicles.joins(:vehicle_provider_mappings)
+            .where(vehicle_provider_mappings: { is_active: true })
+            .distinct.count,
+          needs_maintenance: vehicles.select(&:needs_maintenance?).count
         }
       end
 
@@ -2228,29 +2342,6 @@ module V1
             message: "Vehículo no encontrado"
           }, 404)
         end
-      end
-      desc "Obtener resumen de la flota de vehículos" do
-        detail "Retorna estadísticas agregadas de todos los vehículos"
-      end
-      params do
-        optional :tenant_id, type: Integer, desc: "Filtrar por tenant"
-      end
-      get "summary" do
-        vehicles = Vehicle.all
-        vehicles = vehicles.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
-
-        {
-          total_vehicles: vehicles.count,
-          by_status: vehicles.group(:status).count,
-          by_fuel_type: vehicles.group(:fuel_type).count,
-          by_vehicle_type: vehicles.group(:vehicle_type).count,
-          electric_vehicles: vehicles.electric.count,
-          combustion_vehicles: vehicles.combustion.count,
-          with_telemetry: vehicles.joins(:vehicle_provider_mappings)
-            .where(vehicle_provider_mappings: { is_active: true })
-            .distinct.count,
-          needs_maintenance: vehicles.select(&:needs_maintenance?).count
-        }
       end
     end
   end

@@ -17,7 +17,8 @@ module Entities
         fetched: execution.records_fetched,
         processed: execution.records_processed,
         failed: execution.records_failed,
-        skipped: execution.records_skipped
+        skipped: execution.records_skipped,
+        duplicates: execution.duplicate_records || 0
       }
     end
     expose :status_badge do |execution, _options|
