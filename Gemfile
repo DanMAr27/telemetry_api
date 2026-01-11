@@ -52,8 +52,10 @@ gem "dotenv-rails", "~> 3.1"
 gem "sprockets-rails"
 gem "kaminari"
 gem "faraday", "~> 2.7"
-
-
+gem "roo", "~> 2.10"
+gem "roo-xls", "~> 1.2"  # Support for .xls files
+gem "csv", "~> 3.2"
+gem "write_xlsx"
 
 group :development, :test do
   # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem

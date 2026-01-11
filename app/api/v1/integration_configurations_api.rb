@@ -373,6 +373,40 @@ module V1
             }, 422)
           end
         end
+
+        desc "Upload file for file-based integration" do
+          detail "Upload and process Excel file for providers like Solred (synchronous processing)"
+          consumes [ "multipart/form-data" ]
+          success Entities::FileUploadResponseEntity
+        end
+        params do
+          requires :file, type: File, desc: "Excel file to upload (.xlsx or .xls)", documentation: { param_type: "formData", type: "file" }
+          optional :description, type: String, desc: "Optional description of the upload"
+        end
+        post "files" do
+          # Delegar toda la lógica al servicio
+          service = Integrations::FileUploadService.new(
+            config: @config,
+            file: params[:file],
+            description: params[:description]
+          )
+
+          begin
+            result = service.call
+            present(result, with: Entities::FileUploadResponseEntity)
+          rescue Integrations::FileUploadService::ValidationError => e
+            error!({
+              error: "validation_error",
+              message: e.message
+            }, 422)
+          rescue => e
+            error!({
+              error: "processing_failed",
+              message: e.message,
+              sync_execution_id: service.result.dig(:sync_execution, :id)
+            }, 500)
+          end
+        end
       end
     end
   end

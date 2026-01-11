@@ -20,15 +20,28 @@ module Seeds
       end
 
       puts "✓ Categoría 'Telemetría' creada"
+
+      # Nueva categoría: Tarjetas de Combustible
+      fuel_cards = IntegrationCategory.find_or_create_by!(slug: 'fuel_cards') do |c|
+        c.name = 'Tarjetas de Combustible'
+        c.description = 'Proveedores de tarjetas de pago en estaciones de servicio'
+        c.icon = 'credit-card'
+        c.display_order = 2
+        c.is_active = true
+      end
+
+      puts "✓ Categoría 'Tarjetas de Combustible' creada"
     end
 
     def self.create_providers
-      category = IntegrationCategory.find_by!(slug: 'telemetry')
+      telemetry_category = IntegrationCategory.find_by!(slug: 'telemetry')
+      fuel_cards_category = IntegrationCategory.find_by!(slug: 'fuel_cards')
 
       # Geotab
       geotab = IntegrationProvider.find_or_create_by!(slug: 'geotab') do |p|
-        p.integration_category = category
+        p.integration_category = telemetry_category
         p.name = 'Geotab'
+        p.connection_type = :api
         p.api_base_url = 'https://my.geotab.com/apiv1'
         p.description = 'Plataforma líder en telemetría con cobertura global'
         p.logo_url = 'https://ejemplo.com/logos/geotab.png'
@@ -41,8 +54,9 @@ module Seeds
 
       # Verizon Connect
       verizon = IntegrationProvider.find_or_create_by!(slug: 'verizon_connect') do |p|
-        p.integration_category = category
+        p.integration_category = telemetry_category
         p.name = 'Verizon Connect'
+        p.connection_type = :api
         p.api_base_url = 'https://api.verizonconnect.com/v1'
         p.description = 'Solución integral de gestión de flotas'
         p.logo_url = 'https://ejemplo.com/logos/verizon.png'
@@ -55,8 +69,9 @@ module Seeds
 
       # TomTom Telematics
       tomtom = IntegrationProvider.find_or_create_by!(slug: 'tomtom_telematics') do |p|
-        p.integration_category = category
+        p.integration_category = telemetry_category
         p.name = 'TomTom Telematics'
+        p.connection_type = :api
         p.api_base_url = 'https://api.webfleet.com/v3'
         p.description = 'Telemetría profesional con análisis avanzado'
         p.logo_url = 'https://ejemplo.com/logos/tomtom.png'
@@ -68,6 +83,23 @@ module Seeds
       end
 
       puts "✓ Proveedores creados: Geotab, Verizon Connect, TomTom"
+
+      # Solred (Tarjetas de Combustible)
+      solred = IntegrationProvider.find_or_create_by!(slug: 'solred') do |p|
+        p.integration_category = fuel_cards_category
+        p.name = 'Solred'
+        p.connection_type = :file_upload  # ← Tipo diferente: file_upload
+        p.api_base_url = nil
+        p.description = 'Importación de gastos de tarjetas Solred mediante archivo Excel mensual'
+        p.logo_url = 'https://ejemplo.com/logos/solred.png'
+        p.website_url = 'https://www.solred.es'
+        p.status = 'active'
+        p.is_premium = false
+        p.display_order = 1
+        p.is_active = true
+      end
+
+      puts "✓ Proveedores creados: Geotab, Verizon Connect, TomTom, Solred"
     end
 
     def self.create_auth_schemas
@@ -170,6 +202,27 @@ module Seeds
       )
 
       puts "✓ Schemas de autenticación creados"
+
+      # Solred - Auth Schema simplificado (file_upload)
+      solred = IntegrationProvider.find_by!(slug: 'solred')
+      solred.create_integration_auth_schema!(
+        auth_fields: [
+          {
+            name: 'client_number',
+            type: 'text',
+            label: 'Número de Cliente Solred',
+            placeholder: 'Ej: 0002601',
+            required: false,
+            help_text: 'Opcional: Para validación de archivos'
+          }
+        ],
+        example_credentials: {
+          client_number: '0002601'
+        },
+        is_active: true
+      )
+
+      puts "✓ Schemas de autenticación creados (incluido Solred)"
     end
 
     def self.create_features
@@ -223,6 +276,23 @@ module Seeds
       end
 
       puts "✓ Features creadas para todos los proveedores"
+
+      # Features de Solred
+      solred = IntegrationProvider.find_by!(slug: 'solred')
+      [
+        { key: 'financial_import', name: 'Importación Financiera', desc: 'Carga de ficheros Excel mensuales con transacciones de tarjetas', order: 1 }
+      ].each do |feature|
+        solred.integration_features.find_or_create_by!(feature_key: feature[:key]) do |f|
+          f.feature_name = feature[:name]
+          f.feature_description = feature[:desc]
+          f.display_order = feature[:order]
+          f.is_active = true
+        end
+      end
+
+      puts "✓ Features creadas para todos los proveedores (incluido Solred)"
     end
   end
 end
+
+Seeds::Integrations.run

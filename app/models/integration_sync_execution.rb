@@ -10,7 +10,7 @@ class IntegrationSyncExecution < ApplicationRecord
 
   validates :feature_key, presence: true,
                           inclusion: {
-                            in: %w[fuel battery trips real_time_location odometer diagnostics],
+                            in: %w[fuel battery trips real_time_location odometer diagnostics financial_import],
                             message: "%{value} no es una feature válida"
                           }
   validates :trigger_type, presence: true,

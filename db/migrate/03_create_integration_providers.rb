@@ -13,6 +13,7 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
       t.boolean :is_premium, default: false, null: false
       t.integer :display_order, default: 999, null: false
       t.boolean :is_active, default: true, null: false
+      t.integer :connection_type, default: 0, null: false
       t.timestamps
     end
 
@@ -21,5 +22,6 @@ class CreateIntegrationProviders < ActiveRecord::Migration[7.0]
     add_index :integration_providers, :is_active
     add_index :integration_providers, :is_premium
     add_index :integration_providers, :display_order
+    add_index :integration_providers, :connection_type, name: "index_integration_providers_on_connection_type"
   end
 end

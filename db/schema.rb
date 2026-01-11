@@ -10,9 +10,66 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 13) do
+ActiveRecord::Schema[8.0].define(version: 17) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "card_vehicle_mappings", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "vehicle_id", null: false
+    t.bigint "integration_provider_id", null: false
+    t.string "card_number", null: false
+    t.string "alternate_plate"
+    t.jsonb "metadata", default: {}
+    t.boolean "is_active", default: true
+    t.datetime "valid_from"
+    t.datetime "valid_until"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["card_number"], name: "index_card_vehicle_mappings_on_card_number"
+    t.index ["integration_provider_id"], name: "index_card_vehicle_mappings_on_integration_provider_id"
+    t.index ["tenant_id", "integration_provider_id", "card_number"], name: "idx_card_vehicle_tenant_provider_card", unique: true
+    t.index ["tenant_id"], name: "index_card_vehicle_mappings_on_tenant_id"
+    t.index ["vehicle_id", "is_active"], name: "index_card_vehicle_mappings_on_vehicle_id_and_is_active"
+    t.index ["vehicle_id"], name: "index_card_vehicle_mappings_on_vehicle_id"
+  end
+
+  create_table "financial_transactions", force: :cascade do |t|
+    t.bigint "tenant_id", null: false
+    t.bigint "integration_raw_data_id"
+    t.bigint "tenant_integration_configuration_id", null: false
+    t.string "provider_slug", limit: 50, null: false
+    t.string "card_number", limit: 50
+    t.string "vehicle_plate", limit: 20
+    t.datetime "transaction_date", null: false
+    t.string "location_string", limit: 255
+    t.decimal "location_lat", precision: 10, scale: 8
+    t.decimal "location_lng", precision: 11, scale: 8
+    t.string "product_code", limit: 50
+    t.string "product_name", limit: 100
+    t.decimal "quantity", precision: 10, scale: 3
+    t.decimal "unit_price", precision: 10, scale: 4
+    t.decimal "base_amount", precision: 10, scale: 2
+    t.decimal "discount_amount", precision: 10, scale: 2, default: "0.0"
+    t.decimal "total_amount", precision: 10, scale: 2, null: false
+    t.string "currency", limit: 3, default: "EUR"
+    t.string "status", limit: 20, default: "pending", null: false
+    t.integer "match_confidence", default: 0
+    t.text "discrepancy_flags", default: [], array: true
+    t.jsonb "reconciliation_metadata", default: {}, null: false
+    t.jsonb "provider_metadata", default: {}, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["integration_raw_data_id"], name: "index_financial_transactions_on_integration_raw_data_id"
+    t.index ["provider_metadata"], name: "index_financial_transactions_on_provider_metadata", using: :gin
+    t.index ["provider_slug", "transaction_date"], name: "idx_fin_trans_provider_date"
+    t.index ["reconciliation_metadata"], name: "index_financial_transactions_on_reconciliation_metadata", using: :gin
+    t.index ["status"], name: "index_financial_transactions_on_status"
+    t.index ["tenant_id", "status"], name: "idx_fin_trans_tenant_status"
+    t.index ["tenant_id"], name: "index_financial_transactions_on_tenant_id"
+    t.index ["tenant_integration_configuration_id"], name: "idx_on_tenant_integration_configuration_id_433ca6afed"
+    t.index ["vehicle_plate", "transaction_date"], name: "idx_fin_trans_vehicle_date"
+  end
 
   create_table "integration_auth_schemas", force: :cascade do |t|
     t.bigint "integration_provider_id", null: false
@@ -68,8 +125,10 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.boolean "is_premium", default: false, null: false
     t.integer "display_order", default: 999, null: false
     t.boolean "is_active", default: true, null: false
+    t.integer "connection_type", default: 0, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.index ["connection_type"], name: "index_integration_providers_on_connection_type"
     t.index ["display_order"], name: "index_integration_providers_on_display_order"
     t.index ["integration_category_id"], name: "index_integration_providers_on_integration_category_id"
     t.index ["is_active"], name: "index_integration_providers_on_is_active"
@@ -138,6 +197,22 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.index ["trigger_type"], name: "index_integration_sync_executions_on_trigger_type"
   end
 
+  create_table "product_catalogs", force: :cascade do |t|
+    t.bigint "integration_provider_id", null: false
+    t.string "product_code", null: false
+    t.string "product_name", null: false
+    t.string "energy_type", null: false
+    t.string "fuel_type"
+    t.text "description"
+    t.jsonb "metadata", default: {}
+    t.boolean "is_active", default: true
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["energy_type"], name: "index_product_catalogs_on_energy_type"
+    t.index ["integration_provider_id", "product_code", "product_name"], name: "idx_product_catalog_provider_code_name", unique: true
+    t.index ["integration_provider_id"], name: "index_product_catalogs_on_integration_provider_id"
+  end
+
   create_table "tenant_integration_configurations", force: :cascade do |t|
     t.bigint "tenant_id", null: false
     t.bigint "integration_provider_id", null: false
@@ -200,12 +275,18 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.jsonb "provider_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "financial_transaction_id"
+    t.integer "source", default: 0, null: false
+    t.boolean "is_reconciled", default: false, null: false
     t.index ["charge_start_time"], name: "index_vehicle_electric_charges_on_charge_start_time"
     t.index ["charge_type"], name: "index_vehicle_electric_charges_on_charge_type"
+    t.index ["financial_transaction_id"], name: "index_vehicle_electric_charges_on_financial_transaction_id"
     t.index ["integration_raw_data_id"], name: "idx_charges_raw_unique", unique: true
     t.index ["is_estimated"], name: "index_vehicle_electric_charges_on_is_estimated"
+    t.index ["source", "is_reconciled"], name: "idx_charges_source_reconciled"
     t.index ["tenant_id", "charge_start_time"], name: "idx_charges_tenant_date"
     t.index ["tenant_id"], name: "index_vehicle_electric_charges_on_tenant_id"
+    t.index ["vehicle_id", "charge_start_time", "energy_consumed_kwh"], name: "idx_unique_telemetry_charge", unique: true, where: "(source = ANY (ARRAY[0, 3]))"
     t.index ["vehicle_id", "charge_start_time"], name: "idx_charges_vehicle_date"
     t.index ["vehicle_id"], name: "index_vehicle_electric_charges_on_vehicle_id"
   end
@@ -248,11 +329,17 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.jsonb "provider_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "financial_transaction_id"
+    t.integer "source", default: 0, null: false
+    t.boolean "is_reconciled", default: false, null: false
+    t.index ["financial_transaction_id"], name: "index_vehicle_refuelings_on_financial_transaction_id"
     t.index ["integration_raw_data_id"], name: "idx_refuelings_raw_unique", unique: true
     t.index ["is_estimated"], name: "index_vehicle_refuelings_on_is_estimated"
     t.index ["refueling_date"], name: "index_vehicle_refuelings_on_refueling_date"
+    t.index ["source", "is_reconciled"], name: "idx_refuelings_source_reconciled"
     t.index ["tenant_id", "refueling_date"], name: "idx_refuelings_tenant_date"
     t.index ["tenant_id"], name: "index_vehicle_refuelings_on_tenant_id"
+    t.index ["vehicle_id", "refueling_date", "volume_liters"], name: "idx_unique_telemetry_refueling", unique: true, where: "(source = ANY (ARRAY[0, 3]))"
     t.index ["vehicle_id", "refueling_date"], name: "idx_refuelings_vehicle_date"
     t.index ["vehicle_id"], name: "index_vehicle_refuelings_on_vehicle_id"
   end
@@ -299,19 +386,28 @@ ActiveRecord::Schema[8.0].define(version: 13) do
     t.index ["item_type", "item_id"], name: "index_versions_on_item_type_and_item_id"
   end
 
+  add_foreign_key "card_vehicle_mappings", "integration_providers"
+  add_foreign_key "card_vehicle_mappings", "tenants"
+  add_foreign_key "card_vehicle_mappings", "vehicles"
+  add_foreign_key "financial_transactions", "integration_raw_data", column: "integration_raw_data_id"
+  add_foreign_key "financial_transactions", "tenant_integration_configurations"
+  add_foreign_key "financial_transactions", "tenants"
   add_foreign_key "integration_auth_schemas", "integration_providers"
   add_foreign_key "integration_features", "integration_providers"
   add_foreign_key "integration_providers", "integration_categories"
   add_foreign_key "integration_raw_data", "integration_sync_executions"
   add_foreign_key "integration_raw_data", "tenant_integration_configurations"
   add_foreign_key "integration_sync_executions", "tenant_integration_configurations"
+  add_foreign_key "product_catalogs", "integration_providers"
   add_foreign_key "tenant_integration_configurations", "integration_providers"
   add_foreign_key "tenant_integration_configurations", "tenants"
+  add_foreign_key "vehicle_electric_charges", "financial_transactions"
   add_foreign_key "vehicle_electric_charges", "integration_raw_data", column: "integration_raw_data_id"
   add_foreign_key "vehicle_electric_charges", "tenants"
   add_foreign_key "vehicle_electric_charges", "vehicles"
   add_foreign_key "vehicle_provider_mappings", "tenant_integration_configurations"
   add_foreign_key "vehicle_provider_mappings", "vehicles"
+  add_foreign_key "vehicle_refuelings", "financial_transactions"
   add_foreign_key "vehicle_refuelings", "integration_raw_data", column: "integration_raw_data_id"
   add_foreign_key "vehicle_refuelings", "tenants"
   add_foreign_key "vehicle_refuelings", "vehicles"

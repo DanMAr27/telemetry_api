@@ -170,6 +170,30 @@ module V1
         }
       end
 
+      desc "Create card-vehicle mapping"
+      params do
+        requires :vehicle_id, type: Integer, desc: "Vehicle ID"
+        requires :card_number, type: String, desc: "Card number"
+        optional :alternate_plate, type: String, desc: "Alternate plate"
+      end
+      post "card_mappings" do
+        mapping = Financial::VehicleMappingService.create_card_mapping(
+          @config.tenant_id,
+          @config.integration_provider_id,
+          params[:card_number],
+          params[:vehicle_id],
+          alternate_plate: params[:alternate_plate]
+        )
+
+        present({
+          id: mapping.id,
+          vehicle_id: mapping.vehicle_id,
+          card_number: mapping.card_number,
+          alternate_plate: mapping.alternate_plate,
+          is_active: mapping.is_active
+        })
+      end
+
       route_param :id do
         desc "Obtener detalle de un vehículo" do
           detail "Retorna información completa de un vehículo"

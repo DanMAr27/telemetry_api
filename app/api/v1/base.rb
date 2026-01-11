@@ -47,12 +47,14 @@ module V1
     mount V1::VehicleRefuelingsApi
     mount V1::VehicleElectricChargesApi
     mount V1::RawDataApi
+    mount V1::FinancialTransactionsApi
 
     # Configuración mínima de Swagger
     add_swagger_documentation(
       api_version: "v1",
       mount_path: "/swagger_doc", # endpoint JSON de Swagger
       hide_documentation_path: false,
+      consumes: [ "multipart/form-data" ],
       info: {
         title: "My Grape API V1",
         description: "Documentación básica de la API"

@@ -5,13 +5,22 @@ class VehicleElectricCharge < ApplicationRecord
   belongs_to :integration_raw_data,
              class_name: "IntegrationRawData",
              optional: true
+  belongs_to :financial_transaction, optional: true
 
   has_one :raw_data_source,
           as: :normalized_record,
           class_name: "IntegrationRawData"
 
+  # Enum para origen del dato
+  # telemetry: Dato técnico de telemetría (Geotab, Samsara)
+  # financial: Dato financiero de tarjeta (Solred, Cepsa) sin telemetría
+  # manual: Ingreso manual del usuario
+  # merged: Conciliación exitosa (telemetría + finanzas)
+  enum :source, { telemetry: 0, financial: 1, manual: 2, merged: 3 }
+
   validates :charge_start_time, presence: true
   validates :charge_type, inclusion: { in: %w[AC DC], allow_blank: true }
+  validates :source, presence: true
   validates :start_soc_percent, numericality: {
     greater_than_or_equal_to: 0,
     less_than_or_equal_to: 100
@@ -44,6 +53,14 @@ class VehicleElectricCharge < ApplicationRecord
   scope :complete_charges, -> { where("end_soc_percent >= ?", 95) }
   scope :this_month, -> { where("charge_start_time >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("charge_start_time >= ?", Time.current.beginning_of_year) }
+
+  # Scopes por origen y conciliación
+  scope :from_telemetry, -> { where(source: :telemetry) }
+  scope :from_financial, -> { where(source: :financial) }
+  scope :from_manual, -> { where(source: :manual) }
+  scope :reconciled, -> { where(source: :merged, is_reconciled: true) }
+  scope :unreconciled, -> { where(source: [ :telemetry, :financial ], is_reconciled: false) }
+  scope :pending_reconciliation, -> { where(is_reconciled: false) }
 
   def soc_gained
     return nil unless start_soc_percent && end_soc_percent

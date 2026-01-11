@@ -5,16 +5,25 @@ class VehicleRefueling < ApplicationRecord
   belongs_to :integration_raw_data,
              class_name: "IntegrationRawData",
              optional: true
+  belongs_to :financial_transaction, optional: true
 
   has_one :raw_data_source,
           as: :normalized_record,
           class_name: "IntegrationRawData"
+
+  # Enum para origen del dato
+  # telemetry: Dato técnico de telemetría (Geotab, Samsara)
+  # financial: Dato financiero de tarjeta (Solred, Cepsa) sin telemetría
+  # manual: Ingreso manual del usuario
+  # merged: Conciliación exitosa (telemetría + finanzas)
+  enum :source, { telemetry: 0, financial: 1, manual: 2, merged: 3 }
 
   validates :refueling_date, presence: true
   validates :volume_liters, presence: true,
                             numericality: { greater_than: 0 }
   validates :cost, numericality: { greater_than_or_equal_to: 0 }, allow_nil: true
   validates :currency, length: { is: 3 }, allow_blank: true
+  validates :source, presence: true
   validates :location_lat, numericality: {
     greater_than_or_equal_to: -90,
     less_than_or_equal_to: 90
@@ -36,6 +45,14 @@ class VehicleRefueling < ApplicationRecord
   scope :by_fuel_type, ->(type) { where(fuel_type: type) }
   scope :this_month, -> { where("refueling_date >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("refueling_date >= ?", Time.current.beginning_of_year) }
+
+  # Scopes por origen y conciliación
+  scope :from_telemetry, -> { where(source: :telemetry) }
+  scope :from_financial, -> { where(source: :financial) }
+  scope :from_manual, -> { where(source: :manual) }
+  scope :reconciled, -> { where(source: :merged, is_reconciled: true) }
+  scope :unreconciled, -> { where(source: [ :telemetry, :financial ], is_reconciled: false) }
+  scope :pending_reconciliation, -> { where(is_reconciled: false) }
 
   def cost_per_liter
     return nil unless cost && volume_liters && volume_liters > 0

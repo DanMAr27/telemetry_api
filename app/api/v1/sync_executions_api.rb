@@ -81,7 +81,7 @@ module V1
         requires :integration_id, type: Integer, desc: "ID de la configuración de integración"
         requires :feature_key,
                   type: String,
-                  values: %w[fuel battery trips real_time_location odometer diagnostics],
+                  values: %w[fuel battery trips real_time_location odometer diagnostics financial_import],
                   desc: "Feature a sincronizar"
       end
       post "sync-feature" do
