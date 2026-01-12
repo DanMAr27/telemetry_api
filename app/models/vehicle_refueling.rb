@@ -45,8 +45,6 @@ class VehicleRefueling < ApplicationRecord
   scope :by_fuel_type, ->(type) { where(fuel_type: type) }
   scope :this_month, -> { where("refueling_date >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("refueling_date >= ?", Time.current.beginning_of_year) }
-
-  # Scopes por origen y conciliación
   scope :from_telemetry, -> { where(source: :telemetry) }
   scope :from_financial, -> { where(source: :financial) }
   scope :from_manual, -> { where(source: :manual) }
