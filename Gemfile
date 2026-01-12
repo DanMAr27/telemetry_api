@@ -55,7 +55,7 @@ gem "sprockets-rails"
 gem "kaminari"
 gem "faraday", "~> 2.7"
 gem "roo", "~> 2.10"
-gem "roo-xls", "~> 1.2"  # Support for .xls files
+gem "roo-xls", "~> 2.0"  # Support for .xls files
 gem "csv", "~> 3.2"
 gem "write_xlsx"
 
