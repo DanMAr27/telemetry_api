@@ -3,12 +3,9 @@ module V1
     resource :financial_transactions do
       desc "Reconcile specific transactions manually" do
         detail "Triggers reconciliation for a list of transaction IDs, regardless of their current status"
-        params do
-          requires :transaction_ids, type: Array[Integer], desc: "List of transaction IDs to reconcile"
-        end
-        success do
-          # Returns a summary hash
-        end
+      end
+      params do
+        requires :transaction_ids, type: Array[Integer], desc: "List of transaction IDs to reconcile"
       end
       post "reconcile" do
         # 1. Buscar transacciones

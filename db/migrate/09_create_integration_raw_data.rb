@@ -22,7 +22,7 @@ class CreateIntegrationRawData < ActiveRecord::Migration[7.0]
       t.jsonb :metadata, default: {}, null: false
       t.datetime :last_retry_at
       t.datetime :deleted_at
-      t.integer :retry_count, :integer, default: 0, null: false
+      t.integer :retry_count, default: 0, null: false
       t.timestamps
     end
     add_index :integration_raw_data,

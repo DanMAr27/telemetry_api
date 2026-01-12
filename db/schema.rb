@@ -153,7 +153,6 @@ ActiveRecord::Schema[8.0].define(version: 17) do
     t.datetime "last_retry_at"
     t.datetime "deleted_at"
     t.integer "retry_count", default: 0, null: false
-    t.integer "integer", default: 0, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["deleted_at"], name: "index_integration_raw_data_on_deleted_at"
