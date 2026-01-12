@@ -94,6 +94,13 @@ module Seeds
       ]
 
       acme_transactions.each_with_index do |tx, i|
+        # Buscar mapeo de producto
+        product = ProductCatalog.find_by_code_or_name(
+           solred.id,
+           code: tx[:code],
+           name: tx[:product]
+        )
+
         FinancialTransaction.create!(
           tenant: acme,
           tenant_integration_configuration: solred_config_acme,
@@ -102,8 +109,7 @@ module Seeds
           card_number: tx[:card],
           transaction_date: tx[:date],
           location_string: 'E.S. RALLY, S.A CTRA',
-          product_code: tx[:code],
-          product_name: tx[:product],
+          product_catalog: product,
           quantity: tx[:liters],
           unit_price: tx[:unit_price],
           base_amount: tx[:base],
@@ -130,6 +136,13 @@ module Seeds
       ]
 
       demo_transactions.each_with_index do |tx, i|
+        # Buscar mapeo de producto
+        product = ProductCatalog.find_by_code_or_name(
+           solred.id,
+           code: tx[:code],
+           name: tx[:product]
+        )
+
         FinancialTransaction.create!(
           tenant: demo,
           tenant_integration_configuration: solred_config_demo,
@@ -138,8 +151,7 @@ module Seeds
           card_number: tx[:card],
           transaction_date: tx[:date],
           location_string: 'E.S. DEMO STATION',
-          product_code: tx[:code],
-          product_name: tx[:product],
+          product_catalog: product,
           quantity: tx[:liters],
           unit_price: tx[:unit_price],
           base_amount: tx[:base],

@@ -53,8 +53,6 @@ class VehicleElectricCharge < ApplicationRecord
   scope :complete_charges, -> { where("end_soc_percent >= ?", 95) }
   scope :this_month, -> { where("charge_start_time >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("charge_start_time >= ?", Time.current.beginning_of_year) }
-
-  # Scopes por origen y conciliación
   scope :from_telemetry, -> { where(source: :telemetry) }
   scope :from_financial, -> { where(source: :financial) }
   scope :from_manual, -> { where(source: :manual) }

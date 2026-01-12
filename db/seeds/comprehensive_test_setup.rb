@@ -408,6 +408,7 @@ class ComprehensiveTestSeed
         tenant: @tenants[:acme][:tenant], # Tenant Acme
         tenant_integration_configuration: @tenants[:acme][:solred],
         provider_slug: 'solred',
+        product_catalog: ProductCatalog.find_by(product_code: '001', integration_provider: @tenants[:acme][:solred].integration_provider),
         transaction_date: date,
         total_amount: 50.0,
         status: 'matched', # Ya conciliada

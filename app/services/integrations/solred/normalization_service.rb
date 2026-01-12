@@ -40,6 +40,17 @@ module Integrations
         tenant = @raw_data_record.integration_sync_execution.tenant
         config = @raw_data_record.integration_sync_execution.tenant_integration_configuration
 
+        # Buscar mapeo de producto
+        product = ProductCatalog.find_by_code_or_name(
+          config.integration_provider_id,
+          code: @data[:cod_producto],
+          name: @data[:producto]
+        )
+
+        unless product
+          raise "Product mapping not found for code: #{@data[:cod_producto]} / name: #{@data[:producto]}"
+        end
+
         # Parsear fecha desde string YYYYMMDD (ej: '20260107')
         fecha = Date.strptime(@data[:fecha].to_s, "%Y%m%d")
 
@@ -53,13 +64,12 @@ module Integrations
           integration_raw_data: @raw_data_record,
           tenant: tenant,
           tenant_integration_configuration: config,
+          product_catalog: product,
           provider_slug: "solred",
           vehicle_plate: @data[:matricula],
           card_number: @data[:num_tarjeta],
           transaction_date: transaction_datetime,
           location_string: @data[:establecimiento],
-          product_code: @data[:cod_producto],
-          product_name: @data[:producto],
           quantity: @data[:cantidad].to_f,
           unit_price: @data[:p_unitario].to_f,
           base_amount: @data[:importe].to_f,

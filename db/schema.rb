@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 17) do
+ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -45,8 +45,6 @@ ActiveRecord::Schema[8.0].define(version: 17) do
     t.string "location_string", limit: 255
     t.decimal "location_lat", precision: 10, scale: 8
     t.decimal "location_lng", precision: 11, scale: 8
-    t.string "product_code", limit: 50
-    t.string "product_name", limit: 100
     t.decimal "quantity", precision: 10, scale: 3
     t.decimal "unit_price", precision: 10, scale: 4
     t.decimal "base_amount", precision: 10, scale: 2
@@ -60,7 +58,9 @@ ActiveRecord::Schema[8.0].define(version: 17) do
     t.jsonb "provider_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "product_catalog_id"
     t.index ["integration_raw_data_id"], name: "index_financial_transactions_on_integration_raw_data_id"
+    t.index ["product_catalog_id"], name: "index_financial_transactions_on_product_catalog_id"
     t.index ["provider_metadata"], name: "index_financial_transactions_on_provider_metadata", using: :gin
     t.index ["provider_slug", "transaction_date"], name: "idx_fin_trans_provider_date"
     t.index ["reconciliation_metadata"], name: "index_financial_transactions_on_reconciliation_metadata", using: :gin
@@ -389,6 +389,7 @@ ActiveRecord::Schema[8.0].define(version: 17) do
   add_foreign_key "card_vehicle_mappings", "tenants"
   add_foreign_key "card_vehicle_mappings", "vehicles"
   add_foreign_key "financial_transactions", "integration_raw_data", column: "integration_raw_data_id"
+  add_foreign_key "financial_transactions", "product_catalogs"
   add_foreign_key "financial_transactions", "tenant_integration_configurations"
   add_foreign_key "financial_transactions", "tenants"
   add_foreign_key "integration_auth_schemas", "integration_providers"

@@ -3,6 +3,9 @@ class FinancialTransaction < ApplicationRecord
   belongs_to :tenant
   belongs_to :integration_raw_data, optional: true
   belongs_to :tenant_integration_configuration
+  belongs_to :product_catalog
+
+  delegate :product_name, :product_code, :energy_type, :fuel_type, to: :product_catalog, allow_nil: true
 
   has_one :vehicle_refueling, dependent: :nullify
   has_one :vehicle_electric_charge, dependent: :nullify
@@ -19,6 +22,7 @@ class FinancialTransaction < ApplicationRecord
   validates :total_amount, presence: true, numericality: true
   validates :currency, length: { is: 3 }, allow_blank: true
   validates :status, presence: true
+  validates :product_catalog, presence: true
   validates :match_confidence, numericality: {
     only_integer: true,
     greater_than_or_equal_to: 0,
@@ -45,11 +49,15 @@ class FinancialTransaction < ApplicationRecord
   scope :pending_reconciliation, -> { where(status: "pending") }
   scope :reconciled, -> { where(status: "matched") }
   scope :unreconciled, -> { where(status: "unmatched") }
+
+  scope :with_product_catalog, -> { joins(:product_catalog) }
+
   scope :fuel_transactions, -> {
-    where("product_code NOT IN (?) OR product_code IS NULL", [ "098", "PEAJE", "AUTOPISTA" ])
+    with_product_catalog.where(product_catalogs: { energy_type: [ :fuel, :electric ] })
   }
+
   scope :non_fuel_transactions, -> {
-    where("product_code IN (?)", [ "098", "PEAJE", "AUTOPISTA" ])
+    with_product_catalog.where(product_catalogs: { energy_type: :other })
   }
 
   # ¿Tiene ubicación geográfica?
@@ -70,8 +78,8 @@ class FinancialTransaction < ApplicationRecord
 
   # ¿Es un gasto de combustible/electricidad?
   def is_fuel_transaction?
-    return false if product_code.in?([ "098", "PEAJE", "AUTOPISTA" ])
-    true
+    return false unless product_catalog
+    product_catalog.energy_fuel? || product_catalog.energy_electric?
   end
 
   # ¿Es un gasto no relacionado con combustible?
