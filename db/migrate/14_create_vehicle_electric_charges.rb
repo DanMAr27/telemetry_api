@@ -10,6 +10,7 @@ class CreateVehicleElectricCharges < ActiveRecord::Migration[7.0]
       t.datetime :charge_start_time, null: false
       t.datetime :charge_end_time
       t.integer :duration_minutes
+      t.decimal :cost, precision: 10, scale: 2
       t.decimal :location_lat, precision: 10, scale: 8
       t.decimal :location_lng, precision: 11, scale: 8
       t.string :charge_type, limit: 10

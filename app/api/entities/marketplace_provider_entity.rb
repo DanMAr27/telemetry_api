@@ -32,6 +32,10 @@ module Entities
     expose :website_url
     expose :status
     expose :is_premium
+    expose :connection_type
+    expose :requires_scheduling do |provider, _options|
+      provider.requires_scheduling?
+    end
     expose :category, if: ->(provider, options) { options[:include_category] } do |provider, _options|
       {
         id: provider.integration_category.id,

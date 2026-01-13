@@ -384,7 +384,6 @@ module V1
           optional :description, type: String, desc: "Optional description of the upload"
         end
         post "files" do
-          # Delegar toda la lógica al servicio
           service = Integrations::FileUploadService.new(
             config: @config,
             file: params[:file],

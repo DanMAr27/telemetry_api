@@ -19,12 +19,12 @@ class TenantIntegrationConfiguration < ApplicationRecord
   validates :enabled_features, presence: true
   validate :validate_enabled_features_structure
   validate :validate_credentials_structure, if: -> { credentials.present? }
-  validates :sync_frequency, presence: true, inclusion: { in: %w[daily weekly monthly] }
+  validates :sync_frequency, presence: true, inclusion: { in: %w[daily weekly monthly] }, if: -> { integration_provider&.requires_scheduling? }
   validates :sync_hour, presence: true, numericality: {
     only_integer: true,
     greater_than_or_equal_to: 0,
     less_than_or_equal_to: 23
-  }
+  }, if: -> { integration_provider&.requires_scheduling? }
 
   scope :active, -> { where(is_active: true) }
   scope :inactive, -> { where(is_active: false) }
@@ -51,7 +51,9 @@ class TenantIntegrationConfiguration < ApplicationRecord
 
   def can_be_activated?
     # Verificaciones para poder activar
-    return false unless credentials.present?
+    if integration_provider&.requires_authentication?
+      return false unless credentials.present?
+    end
     return false unless enabled_features.any?
     true
   end

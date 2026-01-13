@@ -6,6 +6,7 @@ class VehicleRefueling < ApplicationRecord
              class_name: "IntegrationRawData",
              optional: true
   belongs_to :financial_transaction, optional: true
+  belongs_to :fuel_type, optional: true # Optional for legacy data or non-fuel entries
 
   has_one :raw_data_source,
           as: :normalized_record,
@@ -42,7 +43,9 @@ class VehicleRefueling < ApplicationRecord
   scope :estimated, -> { where(is_estimated: true) }
   scope :measured, -> { where(is_estimated: false) }
   scope :with_cost, -> { where.not(cost: nil) }
-  scope :by_fuel_type, ->(type) { where(fuel_type: type) }
+  scope :with_cost, -> { where.not(cost: nil) }
+  scope :by_fuel_type, ->(fuel_type_id) { where(fuel_type_id: fuel_type_id) }
+  scope :by_fuel_code, ->(code) { joins(:fuel_type).where(fuel_types: { code: code }) }
   scope :this_month, -> { where("refueling_date >= ?", Time.current.beginning_of_month) }
   scope :this_year, -> { where("refueling_date >= ?", Time.current.beginning_of_year) }
   scope :from_telemetry, -> { where(source: :telemetry) }
@@ -95,7 +98,11 @@ class VehicleRefueling < ApplicationRecord
   end
 
   def self.count_by_fuel_type
-    group(:fuel_type).count
+    joins(:fuel_type).group("fuel_types.name").count
+  end
+
+  def self.volume_by_fuel_type
+    joins(:fuel_type).group("fuel_types.name").sum(:volume_liters)
   end
 
   def self.monthly_summary(year = Time.current.year)

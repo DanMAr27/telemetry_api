@@ -28,24 +28,18 @@ module Entities
     expose :provider_metadata, if: { include_metadata: true }
     expose :created_at
     expose :updated_at
-
-    # Computed fields
     expose :calculated_unit_price, if: { include_computed: true } do |transaction, _options|
       transaction.calculated_unit_price
     end
-
     expose :description, if: { include_computed: true } do |transaction, _options|
       transaction.description
     end
-
     expose :has_location, if: { include_computed: true } do |transaction, _options|
       transaction.has_location?
     end
-
     expose :coordinates, if: { include_computed: true } do |transaction, _options|
       transaction.coordinates
     end
-
     expose :reconciled, if: { include_computed: true } do |transaction, _options|
       transaction.reconciled?
     end
@@ -53,13 +47,9 @@ module Entities
     expose :is_fuel_transaction, if: { include_computed: true } do |transaction, _options|
       transaction.is_fuel_transaction?
     end
-
-    # Related records
     expose :vehicle_refueling, using: Entities::VehicleRefuelingEntity, if: { include_refueling: true }
     expose :vehicle_electric_charge, using: Entities::VehicleElectricChargeEntity, if: { include_charge: true }
     expose :integration_raw_data, using: Entities::IntegrationRawDataEntity, if: { include_raw_data: true }
-
-    # Status badge for UI
     expose :status_badge do |transaction, _options|
       case transaction.status
       when "pending"

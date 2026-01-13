@@ -341,6 +341,88 @@ module V1
           }, 404)
         end
 
+        desc "Conectar dispositivo telemático" do
+          detail "Asigna un dispositivo de telemetría al vehículo"
+        end
+        params do
+          requires :integration_configuration_id, type: Integer, desc: "ID de la configuración"
+          requires :external_vehicle_id, type: String, desc: "ID del dispositivo externo"
+          optional :external_vehicle_name, type: String
+          optional :valid_from, type: DateTime, desc: "Fecha de inicio de la asignación"
+        end
+        post "connect" do
+          vehicle = Vehicle.find(params[:id])
+          config = TenantIntegrationConfiguration.find(params[:integration_configuration_id])
+
+          result = Integrations::VehicleMappings::CreateMappingService.new(
+            config,
+            vehicle,
+            params[:external_vehicle_id],
+            params[:external_vehicle_name],
+            params[:valid_from]
+          ).call
+
+          if result.success?
+            present result.data, with: Entities::VehicleProviderMappingEntity
+          else
+            error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound => e
+          error!({ error: "not_found", message: e.message }, 404)
+        end
+
+        desc "Desconectar dispositivo telemático" do
+          detail "Finaliza la asignación de un dispositivo"
+        end
+        params do
+          requires :mapping_id, type: Integer, desc: "ID del mapeo a cerrar"
+          optional :valid_until, type: DateTime, desc: "Fecha de fin de la asignación"
+        end
+        post "disconnect" do
+          vehicle = Vehicle.find(params[:id])
+          mapping = VehicleProviderMapping.find(params[:mapping_id])
+
+          # Security check: Ensure mapping belongs to this vehicle
+          unless mapping.vehicle_id == vehicle.id
+            error!({ error: "mismatch", message: "El mapeo no pertenece a este vehículo" }, 422)
+          end
+
+          result = Integrations::VehicleMappings::DisconnectService.new(
+            mapping,
+            params[:valid_until]
+          ).call
+
+          if result.success?
+            present result.data, with: Entities::VehicleProviderMappingEntity
+          else
+            error!({ error: "validation_error", message: result.errors.join(", ") }, 422)
+          end
+        rescue ActiveRecord::RecordNotFound
+          error!({ error: "not_found", message: "Recurso no encontrado" }, 404)
+        end
+
+        desc "Listar historial de mapeos del vehículo" do
+          detail "Retorna todos los mapeos (activos e inactivos) de este vehículo"
+        end
+        get "mappings" do
+          vehicle = Vehicle.find(params[:id])
+          mappings = vehicle.vehicle_provider_mappings.order(valid_from: :desc)
+          present mappings, with: Entities::VehicleProviderMappingEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({ error: "not_found", message: "Vehículo no encontrado" }, 404)
+        end
+
+        desc "Obtener detalle de un mapeo específico del vehículo" do
+          detail "Retorna el detalle de un mapeo validando que pertenezca al vehículo"
+        end
+        get "mappings/:mapping_id" do
+          vehicle = Vehicle.find(params[:id])
+          mapping = vehicle.vehicle_provider_mappings.find_by!(id: params[:mapping_id])
+          present mapping, with: Entities::VehicleProviderMappingEntity
+        rescue ActiveRecord::RecordNotFound
+          error!({ error: "not_found", message: "Mapeo no encontrado o no pertenece a este vehículo" }, 404)
+        end
+
         desc "Obtener estado de telemetría del vehículo" do
           detail "Retorna información sobre la telemetría activa"
         end

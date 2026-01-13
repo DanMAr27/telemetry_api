@@ -1,6 +1,7 @@
 # app/models/product_catalog.rb
 class ProductCatalog < ApplicationRecord
   belongs_to :integration_provider
+  belongs_to :fuel_type, optional: true
 
   # Enum para tipo de energía
   enum :energy_type, {

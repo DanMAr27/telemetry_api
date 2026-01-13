@@ -19,10 +19,13 @@ module Integrations
         private
 
         def extract_charge_data(raw_data, config)
-          external_vehicle_id = extract_field(raw_data, "device.id")
-          vehicle = map_vehicle(external_vehicle_id, config)
-
+          # First extract the start time for temporal validation
           start_time = parse_date(extract_field(raw_data, "startTime"))
+
+          external_vehicle_id = extract_field(raw_data, "device.id")
+          # Pass event_timestamp to resolve vehicle correctly at that time
+          vehicle = map_vehicle(external_vehicle_id, config, event_timestamp: start_time)
+
           duration_str = extract_field(raw_data, "duration") # "03:28:33.258"
           duration_minutes = parse_duration_to_minutes(duration_str)
 

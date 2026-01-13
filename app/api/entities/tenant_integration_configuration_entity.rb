@@ -133,6 +133,9 @@ module Entities
         }
       end
     end
+    expose :credentials do |config, _options|
+      config.credentials
+    end
     expose :status_badge do |config, _options|
       if config.is_active
         config.last_sync_status == "error" ? "active_with_errors" : "active"

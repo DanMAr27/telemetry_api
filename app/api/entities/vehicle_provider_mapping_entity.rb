@@ -9,6 +9,8 @@ module Entities
     expose :is_active
     expose :mapped_at
     expose :last_sync_at
+    expose :valid_from
+    expose :valid_until
     expose :external_metadata
     expose :created_at
     expose :updated_at

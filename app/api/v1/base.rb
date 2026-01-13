@@ -5,26 +5,25 @@ module V1
     prefix :api
     format :json
 
-    # Helpers globales
-    helpers do
-      def current_user
-        # Implementar según tu sistema de autenticación
-        # Por ejemplo: User.find_by(api_token: headers['Authorization'])
-        @current_user ||= authenticate_user!
-      end
+    # # Helpers globales
+    # helpers do
+    #   def current_user
+    #     # Implementar según tu sistema de autenticación
+    #     # Por ejemplo: User.find_by(api_token: headers['Authorization'])
+    #     @current_user ||= authenticate_user!
+    #   end
 
-      def authenticate_user!
-        # Implementar tu lógica de autenticación
-        # error!('Unauthorized', 401) unless authenticated?
-      end
+    #   def authenticate_user!
+    #     # Implementar tu lógica de autenticación
+    #     # error!('Unauthorized', 401) unless authenticated?
+    #   end
 
-      def authenticated?
-        # Tu lógica de verificación
-        true # Temporal para POC
-      end
-    end
+    #   def authenticated?
+    #     # Tu lógica de verificación
+    #     true # Temporal para POC
+    #   end
+    # end
 
-    # Manejo de errores global
     rescue_from ActiveRecord::RecordNotFound do |e|
       error!({ error: "Not Found", message: e.message }, 404)
     end
@@ -36,7 +35,6 @@ module V1
     rescue_from Grape::Exceptions::ValidationErrors do |e|
       error!({ error: "Validation Errors", errors: e.errors }, 400)
     end
-
 
     mount V1::MarketplaceApi
     mount V1::TenantsApi

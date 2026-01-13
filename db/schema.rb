@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
+ActiveRecord::Schema[8.0].define(version: 19) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -38,6 +38,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.bigint "tenant_id", null: false
     t.bigint "integration_raw_data_id"
     t.bigint "tenant_integration_configuration_id", null: false
+    t.bigint "product_catalog_id"
     t.string "provider_slug", limit: 50, null: false
     t.string "card_number", limit: 50
     t.string "vehicle_plate", limit: 20
@@ -58,7 +59,6 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.jsonb "provider_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.bigint "product_catalog_id"
     t.index ["integration_raw_data_id"], name: "index_financial_transactions_on_integration_raw_data_id"
     t.index ["product_catalog_id"], name: "index_financial_transactions_on_product_catalog_id"
     t.index ["provider_metadata"], name: "index_financial_transactions_on_provider_metadata", using: :gin
@@ -69,6 +69,16 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.index ["tenant_id"], name: "index_financial_transactions_on_tenant_id"
     t.index ["tenant_integration_configuration_id"], name: "idx_on_tenant_integration_configuration_id_433ca6afed"
     t.index ["vehicle_plate", "transaction_date"], name: "idx_fin_trans_vehicle_date"
+  end
+
+  create_table "fuel_types", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "code", null: false
+    t.integer "energy_group", default: 0
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["code"], name: "index_fuel_types_on_code", unique: true
+    t.index ["name"], name: "index_fuel_types_on_name", unique: true
   end
 
   create_table "integration_auth_schemas", force: :cascade do |t|
@@ -198,6 +208,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
 
   create_table "product_catalogs", force: :cascade do |t|
     t.bigint "integration_provider_id", null: false
+    t.bigint "fuel_type_id"
     t.string "product_code", null: false
     t.string "product_name", null: false
     t.string "energy_type", null: false
@@ -208,6 +219,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["energy_type"], name: "index_product_catalogs_on_energy_type"
+    t.index ["fuel_type_id"], name: "index_product_catalogs_on_fuel_type_id"
     t.index ["integration_provider_id", "product_code", "product_name"], name: "idx_product_catalog_provider_code_name", unique: true
     t.index ["integration_provider_id"], name: "index_product_catalogs_on_integration_provider_id"
   end
@@ -261,6 +273,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.datetime "charge_start_time", null: false
     t.datetime "charge_end_time"
     t.integer "duration_minutes"
+    t.decimal "cost", precision: 10, scale: 2
     t.decimal "location_lat", precision: 10, scale: 8
     t.decimal "location_lng", precision: 11, scale: 8
     t.string "charge_type", limit: 10
@@ -298,13 +311,16 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.boolean "is_active", default: true, null: false
     t.datetime "mapped_at"
     t.datetime "last_sync_at"
+    t.datetime "valid_from", null: false
+    t.datetime "valid_until"
     t.jsonb "external_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.index ["external_vehicle_id"], name: "index_vehicle_provider_mappings_on_external_vehicle_id"
     t.index ["is_active"], name: "index_vehicle_provider_mappings_on_is_active"
     t.index ["last_sync_at"], name: "index_vehicle_provider_mappings_on_last_sync_at"
-    t.index ["tenant_integration_configuration_id", "external_vehicle_id"], name: "idx_vpm_config_external", unique: true
+    t.index ["tenant_integration_configuration_id", "external_vehicle_id", "valid_from", "valid_until"], name: "idx_vpm_history_lookup"
+    t.index ["tenant_integration_configuration_id", "external_vehicle_id"], name: "idx_vpm_config_external_active", unique: true, where: "(is_active = true)"
     t.index ["tenant_integration_configuration_id"], name: "idx_vpm_config"
     t.index ["vehicle_id", "tenant_integration_configuration_id", "is_active"], name: "idx_vpm_vehicle_config_active", unique: true, where: "(is_active = true)"
     t.index ["vehicle_id"], name: "index_vehicle_provider_mappings_on_vehicle_id"
@@ -314,6 +330,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.bigint "tenant_id", null: false
     t.bigint "vehicle_id", null: false
     t.bigint "integration_raw_data_id"
+    t.bigint "fuel_type_id"
     t.datetime "refueling_date", null: false
     t.decimal "location_lat", precision: 10, scale: 8
     t.decimal "location_lng", precision: 11, scale: 8
@@ -321,7 +338,6 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.decimal "cost", precision: 10, scale: 2
     t.string "currency", limit: 3
     t.decimal "odometer_km", precision: 12, scale: 2
-    t.string "fuel_type", limit: 50
     t.string "confidence_level", limit: 100
     t.boolean "is_estimated", default: false, null: false
     t.decimal "tank_capacity_liters", precision: 10, scale: 2
@@ -332,6 +348,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
     t.integer "source", default: 0, null: false
     t.boolean "is_reconciled", default: false, null: false
     t.index ["financial_transaction_id"], name: "index_vehicle_refuelings_on_financial_transaction_id"
+    t.index ["fuel_type_id"], name: "index_vehicle_refuelings_on_fuel_type_id"
     t.index ["integration_raw_data_id"], name: "idx_refuelings_raw_unique", unique: true
     t.index ["is_estimated"], name: "index_vehicle_refuelings_on_is_estimated"
     t.index ["refueling_date"], name: "index_vehicle_refuelings_on_refueling_date"
@@ -398,6 +415,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
   add_foreign_key "integration_raw_data", "integration_sync_executions"
   add_foreign_key "integration_raw_data", "tenant_integration_configurations"
   add_foreign_key "integration_sync_executions", "tenant_integration_configurations"
+  add_foreign_key "product_catalogs", "fuel_types"
   add_foreign_key "product_catalogs", "integration_providers"
   add_foreign_key "tenant_integration_configurations", "integration_providers"
   add_foreign_key "tenant_integration_configurations", "tenants"
@@ -408,6 +426,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_13_075259) do
   add_foreign_key "vehicle_provider_mappings", "tenant_integration_configurations"
   add_foreign_key "vehicle_provider_mappings", "vehicles"
   add_foreign_key "vehicle_refuelings", "financial_transactions"
+  add_foreign_key "vehicle_refuelings", "fuel_types"
   add_foreign_key "vehicle_refuelings", "integration_raw_data", column: "integration_raw_data_id"
   add_foreign_key "vehicle_refuelings", "tenants"
   add_foreign_key "vehicle_refuelings", "vehicles"

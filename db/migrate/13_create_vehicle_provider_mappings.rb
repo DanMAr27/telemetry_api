@@ -12,6 +12,8 @@ class CreateVehicleProviderMappings < ActiveRecord::Migration[7.0]
       t.boolean :is_active, default: true, null: false
       t.datetime :mapped_at
       t.datetime :last_sync_at
+      t.datetime :valid_from, null: false
+      t.datetime :valid_until
       t.jsonb :external_metadata, default: {}, null: false
       t.timestamps
     end
@@ -20,11 +22,12 @@ class CreateVehicleProviderMappings < ActiveRecord::Migration[7.0]
               unique: true,
               where: "is_active = true",
               name: 'idx_vpm_vehicle_config_active'
+    add_index :vehicle_provider_mappings, [ :tenant_integration_configuration_id, :external_vehicle_id, :valid_from, :valid_until ], name: "idx_vpm_history_lookup"
     add_index :vehicle_provider_mappings,
               [ :tenant_integration_configuration_id, :external_vehicle_id ],
               unique: true,
-              name: 'idx_vpm_config_external'
-
+              where: "is_active = true",
+              name: "idx_vpm_config_external_active"
     add_index :vehicle_provider_mappings, :external_vehicle_id
     add_index :vehicle_provider_mappings, :is_active
     add_index :vehicle_provider_mappings, :last_sync_at

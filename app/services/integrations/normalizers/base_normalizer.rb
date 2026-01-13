@@ -9,18 +9,18 @@ module Integrations
       protected
 
       # Mapear external_vehicle_id a vehicle_id de nuestra BD
-      def map_vehicle(external_vehicle_id, config)
-        mapping = VehicleProviderMapping.find_by(
-          tenant_integration_configuration: config,
-          external_vehicle_id: external_vehicle_id,
-          is_active: true
+      def map_vehicle(external_vehicle_id, config, event_timestamp:)
+        vehicle = VehicleProviderMapping.resolve_vehicle(
+          external_id: external_vehicle_id,
+          config_id: config.id,
+          timestamp: event_timestamp
         )
 
-        unless mapping
-          raise "Vehicle mapping not found for external_id: #{external_vehicle_id}"
+        unless vehicle
+          raise "Vehicle mapping not found for external_id: #{external_vehicle_id} at #{event_timestamp}"
         end
 
-        mapping.vehicle
+        vehicle
       end
 
       # Extraer valor de un campo del raw_data

@@ -10,6 +10,8 @@ if solred
     # COMBUSTIBLES
     { code: '012', name: 'EFITEC 95 N', energy_type: 'fuel', fuel_type: 'gasoline' },
     { code: '912', name: 'EFITEC 95 N', energy_type: 'fuel', fuel_type: 'gasoline' },
+    { code: '001', name: 'DIESEL TEST', energy_type: 'fuel', fuel_type: 'diesel' }, # Used in seeds
+    { code: '012', name: 'EFITEC 98 N', energy_type: 'fuel', fuel_type: 'premium' },
     { code: '012', name: 'EFITEC 98 N', energy_type: 'fuel', fuel_type: 'premium' },
     { code: '912', name: 'EFITEC 98 N', energy_type: 'fuel', fuel_type: 'premium' },
     { code: '013', name: 'EFITEC N C', energy_type: 'fuel', fuel_type: 'diesel' },
@@ -99,7 +101,8 @@ if solred
     # OTROS SERVICIOS
     { code: '129', name: 'LAVADO', energy_type: 'other', fuel_type: nil },
     { code: '083', name: 'TALLER', energy_type: 'other', fuel_type: nil },
-    { code: '211', name: 'GASOLINERAS', energy_type: 'other', fuel_type: nil }
+    { code: '211', name: 'GASOLINERAS', energy_type: 'other', fuel_type: nil },
+    { code: '098', name: 'AUTOPISTAS', energy_type: 'other', fuel_type: nil }
   ]
 
   products.each do |p|
@@ -109,7 +112,12 @@ if solred
       product_name: p[:name]
     ) do |catalog|
       catalog.energy_type = p[:energy_type]
-      catalog.fuel_type = p[:fuel_type]
+      # Map legacy enum fuel_type to new FuelType relationship
+      if p[:fuel_type].present?
+        # Clean naming mapping (e.g. 'gasoline' -> 'gasoline')
+        ft_code = p[:fuel_type]
+        catalog.fuel_type = FuelType.find_by(code: ft_code)
+      end
       catalog.is_active = true
     end
   end

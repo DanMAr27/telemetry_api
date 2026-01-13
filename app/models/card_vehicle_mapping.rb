@@ -9,7 +9,6 @@ class CardVehicleMapping < ApplicationRecord
     scope: [ :tenant_id, :integration_provider_id ],
     message: "already mapped for this tenant and provider"
   }
-
   validate :vehicle_belongs_to_tenant
 
   before_validation :normalize_card_number

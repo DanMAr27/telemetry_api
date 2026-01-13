@@ -7,7 +7,9 @@ module Entities
     expose :cost
     expose :currency
     expose :odometer_km
-    expose :fuel_type
+    expose :fuel_type do |refueling, _options|
+      refueling.fuel_type&.name || "Unknown"
+    end
     expose :is_estimated
     expose :vehicle_info do |refueling, _options|
       {

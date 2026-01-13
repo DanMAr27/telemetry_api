@@ -68,6 +68,16 @@ class IntegrationProvider < ApplicationRecord
     file_upload?
   end
 
+  def requires_scheduling?
+    api? || sftp?
+  end
+
+  def requires_authentication?
+    return false if file_upload?
+    return false if integration_auth_schema.nil?
+    true
+  end
+
   private
 
   def generate_slug

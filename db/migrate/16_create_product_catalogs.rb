@@ -3,6 +3,7 @@ class CreateProductCatalogs < ActiveRecord::Migration[8.0]
   def change
     create_table :product_catalogs do |t|
       t.references :integration_provider, null: false, foreign_key: true
+      t.references :fuel_type, null: true, foreign_key: true
       t.string :product_code, null: false
       t.string :product_name, null: false
       t.string :energy_type, null: false # 'fuel', 'electric', 'other'

@@ -2,23 +2,17 @@
 class CreateFinancialTransactions < ActiveRecord::Migration[8.0]
   def change
     create_table :financial_transactions do |t|
-      # Referencias
       t.references :tenant, null: false, foreign_key: true, index: true
       t.references :integration_raw_data, foreign_key: true, index: true
       t.references :tenant_integration_configuration, null: false, foreign_key: true, index: true
-
-      # Identificación del proveedor (multi-provider)
+      t.references :product_catalog, foreign_key: true, index: true
       t.string :provider_slug, limit: 50, null: false
-
-      # Identificación de la transacción
       t.string :card_number, limit: 50
       t.string :vehicle_plate, limit: 20
       t.datetime :transaction_date, null: false
       t.string :location_string, limit: 255
       t.decimal :location_lat, precision: 10, scale: 8
       t.decimal :location_lng, precision: 11, scale: 8
-      t.string :product_code, limit: 50
-      t.string :product_name, limit: 100
       t.decimal :quantity, precision: 10, scale: 3
       t.decimal :unit_price, precision: 10, scale: 4
       t.decimal :base_amount, precision: 10, scale: 2

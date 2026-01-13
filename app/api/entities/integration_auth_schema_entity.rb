@@ -15,15 +15,12 @@ module Entities
         slug: schema.integration_provider.slug
       }
     end
-
     expose :field_names, if: { include_computed: true } do |schema, _options|
       schema.field_names
     end
-
     expose :required_fields, if: { include_computed: true } do |schema, _options|
       schema.required_fields
     end
-
     expose :total_fields_count, if: { include_counts: true } do |schema, _options|
       schema.auth_fields.is_a?(Array) ? schema.auth_fields.count : 0
     end
