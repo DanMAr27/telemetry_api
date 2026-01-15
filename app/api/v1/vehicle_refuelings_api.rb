@@ -97,6 +97,74 @@ module V1
           }
         }
       end
+
+      desc "Preview deletion impact for refueling" do
+        detail "Analyzes the impact of deleting a refueling without actually deleting it"
+      end
+      params do
+        requires :id, type: Integer, desc: "Refueling ID"
+      end
+      post ":id/deletion-preview" do
+        refueling = VehicleRefueling.find(params[:id])
+        impact = SoftDelete::ImpactAnalyzer.new(refueling).analyze
+
+        {
+          refueling_id: params[:id],
+          can_delete: impact[:can_delete],
+          recommendation: impact[:recommendation],
+          blockers: impact[:blockers],
+          warnings: impact[:warnings],
+          impact: {
+            will_cascade: impact[:will_cascade],
+            will_nullify: impact[:will_nullify],
+            total_affected: impact[:total_affected]
+          },
+          estimated_time: impact[:estimated_time]
+        }
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Refueling not found" }, 404)
+      end
+
+      desc "Soft delete refueling" do
+        detail "Soft deletes a refueling with validations and audit trail"
+      end
+      params do
+        requires :id, type: Integer, desc: "Refueling ID"
+        optional :force, type: Boolean, default: false, desc: "Force deletion ignoring warnings"
+      end
+      delete ":id" do
+        refueling = VehicleRefueling.find(params[:id])
+
+        coordinator = SoftDelete::DeletionCoordinator.new(
+          refueling,
+          force: params[:force]
+        )
+
+        result = coordinator.call
+
+        if result[:success]
+          {
+            success: true,
+            message: result[:message],
+            refueling_id: params[:id],
+            impact: {
+              cascade_count: result[:cascade_count],
+              nullify_count: result[:nullify_count]
+            },
+            audit_log_id: result[:audit_log]&.id
+          }
+        else
+          error!({
+            error: "deletion_failed",
+            message: result[:message],
+            errors: result[:errors],
+            warnings: result[:warnings],
+            requires_force: result[:requires_force]
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Refueling not found" }, 404)
+      end
     end
   end
 end

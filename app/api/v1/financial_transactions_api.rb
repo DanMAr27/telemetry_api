@@ -118,6 +118,74 @@ module V1
           reconciliation: total_stats
         })
       end
+
+      desc "Preview deletion impact" do
+        detail "Analyzes the impact of deleting a transaction without actually deleting it"
+      end
+      params do
+        requires :id, type: Integer, desc: "Transaction ID"
+      end
+      post ":id/deletion-preview" do
+        transaction = FinancialTransaction.find(params[:id])
+        impact = SoftDelete::ImpactAnalyzer.new(transaction).analyze
+
+        {
+          transaction_id: params[:id],
+          can_delete: impact[:can_delete],
+          recommendation: impact[:recommendation],
+          blockers: impact[:blockers],
+          warnings: impact[:warnings],
+          impact: {
+            will_cascade: impact[:will_cascade],
+            will_nullify: impact[:will_nullify],
+            total_affected: impact[:total_affected]
+          },
+          estimated_time: impact[:estimated_time]
+        }
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Transaction not found" }, 404)
+      end
+
+      desc "Soft delete transaction" do
+        detail "Soft deletes a transaction with validations and audit trail"
+      end
+      params do
+        requires :id, type: Integer, desc: "Transaction ID"
+        optional :force, type: Boolean, default: false, desc: "Force deletion ignoring warnings"
+      end
+      delete ":id" do
+        transaction = FinancialTransaction.find(params[:id])
+
+        coordinator = SoftDelete::DeletionCoordinator.new(
+          transaction,
+          force: params[:force]
+        )
+
+        result = coordinator.call
+
+        if result[:success]
+          {
+            success: true,
+            message: result[:message],
+            transaction_id: params[:id],
+            impact: {
+              cascade_count: result[:cascade_count],
+              nullify_count: result[:nullify_count]
+            },
+            audit_log_id: result[:audit_log]&.id
+          }
+        else
+          error!({
+            error: "deletion_failed",
+            message: result[:message],
+            errors: result[:errors],
+            warnings: result[:warnings],
+            requires_force: result[:requires_force]
+          }, 422)
+        end
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Transaction not found" }, 404)
+      end
     end
   end
 end

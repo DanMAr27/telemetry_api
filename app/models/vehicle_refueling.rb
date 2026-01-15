@@ -1,5 +1,6 @@
 # app/models/vehicle_refueling.rb
 class VehicleRefueling < ApplicationRecord
+  include SoftDeletable
   belongs_to :tenant
   belongs_to :vehicle
   belongs_to :integration_raw_data,
@@ -114,5 +115,31 @@ class VehicleRefueling < ApplicationRecord
         "SUM(volume_liters) as total_liters",
         "SUM(cost) as total_cost"
       )
+  end
+
+  # SOFT DELETE CONFIGURATION
+
+  # Validaciones antes de borrar
+  def soft_delete_validations
+    validations = []
+
+    if is_reconciled?
+      validations << {
+        severity: "blocker",
+        message: "No se puede eliminar un repostaje conciliado"
+      }
+    end
+
+    validations
+  end
+
+  # Hook antes del borrado para guardar contexto
+  def before_soft_delete(context)
+    context[:source] = source
+    context[:volume_liters] = volume_liters
+    context[:refueling_date] = refueling_date
+    context[:vehicle_id] = vehicle_id
+    context[:is_reconciled] = is_reconciled
+    context[:has_financial_transaction] = financial_transaction.present?
   end
 end

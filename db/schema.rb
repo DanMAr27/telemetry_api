@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 19) do
+ActiveRecord::Schema[8.0].define(version: 2026_01_14_185222) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -59,6 +59,8 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.jsonb "provider_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.datetime "discarded_at"
+    t.index ["discarded_at"], name: "index_financial_transactions_on_discarded_at"
     t.index ["integration_raw_data_id"], name: "index_financial_transactions_on_integration_raw_data_id"
     t.index ["product_catalog_id"], name: "index_financial_transactions_on_product_catalog_id"
     t.index ["provider_metadata"], name: "index_financial_transactions_on_provider_metadata", using: :gin
@@ -161,11 +163,11 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.datetime "normalized_at"
     t.jsonb "metadata", default: {}, null: false
     t.datetime "last_retry_at"
-    t.datetime "deleted_at"
+    t.datetime "discarded_at"
     t.integer "retry_count", default: 0, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["deleted_at"], name: "index_integration_raw_data_on_deleted_at"
+    t.index ["discarded_at"], name: "index_integration_raw_data_on_discarded_at"
     t.index ["external_id"], name: "index_integration_raw_data_on_external_id"
     t.index ["integration_sync_execution_id", "processing_status"], name: "idx_raw_data_exec_status"
     t.index ["integration_sync_execution_id"], name: "idx_raw_data_execution"
@@ -174,7 +176,7 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.index ["normalized_record_type", "normalized_record_id"], name: "idx_raw_data_normalized"
     t.index ["processing_status"], name: "index_integration_raw_data_on_processing_status"
     t.index ["retry_count"], name: "index_integration_raw_data_on_retry_count"
-    t.index ["tenant_integration_configuration_id", "external_id", "feature_key"], name: "idx_raw_data_config_external_feature", unique: true, where: "(deleted_at IS NULL)"
+    t.index ["tenant_integration_configuration_id", "external_id", "feature_key"], name: "idx_raw_data_config_external_feature", unique: true, where: "(discarded_at IS NULL)"
     t.index ["tenant_integration_configuration_id", "processing_status", "created_at"], name: "idx_raw_data_config_status_date"
     t.index ["tenant_integration_configuration_id", "provider_slug", "feature_key", "external_id"], name: "idx_raw_data_unique", unique: true
     t.index ["tenant_integration_configuration_id"], name: "idx_raw_data_config"
@@ -222,6 +224,30 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.index ["fuel_type_id"], name: "index_product_catalogs_on_fuel_type_id"
     t.index ["integration_provider_id", "product_code", "product_name"], name: "idx_product_catalog_provider_code_name", unique: true
     t.index ["integration_provider_id"], name: "index_product_catalogs_on_integration_provider_id"
+  end
+
+  create_table "soft_delete_audit_logs", force: :cascade do |t|
+    t.string "record_type", null: false
+    t.bigint "record_id", null: false
+    t.string "performed_by_type"
+    t.bigint "performed_by_id"
+    t.string "action", limit: 20, null: false
+    t.jsonb "context", default: {}, null: false
+    t.integer "cascade_count", default: 0, null: false
+    t.integer "nullify_count", default: 0, null: false
+    t.boolean "can_restore", default: true, null: false
+    t.string "restore_complexity", limit: 20
+    t.datetime "performed_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["action"], name: "index_soft_delete_audit_logs_on_action"
+    t.index ["can_restore"], name: "index_soft_delete_audit_logs_on_can_restore"
+    t.index ["cascade_count"], name: "index_audit_logs_on_high_cascade", where: "(cascade_count > 10)"
+    t.index ["performed_at"], name: "index_soft_delete_audit_logs_on_performed_at"
+    t.index ["performed_by_type", "performed_by_id", "performed_at"], name: "index_audit_logs_on_user_date"
+    t.index ["performed_by_type", "performed_by_id"], name: "index_soft_delete_audit_logs_on_performed_by"
+    t.index ["record_type", "action", "performed_at"], name: "index_audit_logs_on_record_type_action_date"
+    t.index ["record_type", "record_id"], name: "index_soft_delete_audit_logs_on_record"
   end
 
   create_table "tenant_integration_configurations", force: :cascade do |t|
@@ -290,8 +316,10 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.bigint "financial_transaction_id"
     t.integer "source", default: 0, null: false
     t.boolean "is_reconciled", default: false, null: false
+    t.datetime "discarded_at"
     t.index ["charge_start_time"], name: "index_vehicle_electric_charges_on_charge_start_time"
     t.index ["charge_type"], name: "index_vehicle_electric_charges_on_charge_type"
+    t.index ["discarded_at"], name: "index_vehicle_electric_charges_on_discarded_at"
     t.index ["financial_transaction_id"], name: "index_vehicle_electric_charges_on_financial_transaction_id"
     t.index ["integration_raw_data_id"], name: "idx_charges_raw_unique", unique: true
     t.index ["is_estimated"], name: "index_vehicle_electric_charges_on_is_estimated"
@@ -316,6 +344,8 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.jsonb "external_metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.datetime "discarded_at"
+    t.index ["discarded_at"], name: "index_vehicle_provider_mappings_on_discarded_at"
     t.index ["external_vehicle_id"], name: "index_vehicle_provider_mappings_on_external_vehicle_id"
     t.index ["is_active"], name: "index_vehicle_provider_mappings_on_is_active"
     t.index ["last_sync_at"], name: "index_vehicle_provider_mappings_on_last_sync_at"
@@ -347,6 +377,8 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.bigint "financial_transaction_id"
     t.integer "source", default: 0, null: false
     t.boolean "is_reconciled", default: false, null: false
+    t.datetime "discarded_at"
+    t.index ["discarded_at"], name: "index_vehicle_refuelings_on_discarded_at"
     t.index ["financial_transaction_id"], name: "index_vehicle_refuelings_on_financial_transaction_id"
     t.index ["fuel_type_id"], name: "index_vehicle_refuelings_on_fuel_type_id"
     t.index ["integration_raw_data_id"], name: "idx_refuelings_raw_unique", unique: true
@@ -382,6 +414,8 @@ ActiveRecord::Schema[8.0].define(version: 19) do
     t.jsonb "metadata", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.datetime "discarded_at"
+    t.index ["discarded_at"], name: "index_vehicles_on_discarded_at"
     t.index ["fuel_type"], name: "index_vehicles_on_fuel_type"
     t.index ["is_electric"], name: "index_vehicles_on_is_electric"
     t.index ["status"], name: "index_vehicles_on_status"

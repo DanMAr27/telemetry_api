@@ -1,5 +1,6 @@
 # app/models/financial_transaction.rb
 class FinancialTransaction < ApplicationRecord
+  include SoftDeletable
   belongs_to :tenant
   belongs_to :integration_raw_data, optional: true
   belongs_to :tenant_integration_configuration
@@ -134,5 +135,41 @@ class FinancialTransaction < ApplicationRecord
         "SUM(total_amount) as total_amount",
         "SUM(quantity) as total_quantity"
       )
+  end
+
+  # SOFT DELETE CONFIGURATION
+
+  # Relaciones que se desvinculan (FK = NULL) al borrar
+  # Las relaciones vehicle_refueling y vehicle_electric_charge tienen dependent: :nullify
+  # pero las gestionamos explícitamente aquí para tener control y auditoría
+  def soft_delete_nullify_relations
+    [
+      { model: "VehicleRefueling", foreign_key: "financial_transaction_id", name: "Repostajes" },
+      { model: "VehicleElectricCharge", foreign_key: "financial_transaction_id", name: "Cargas eléctricas" }
+    ]
+  end
+
+  # Validaciones antes de borrar
+  def soft_delete_validations
+    validations = []
+
+    if status_matched?
+      validations << {
+        severity: "blocker",
+        message: "No se puede eliminar una transacción conciliada (matched)"
+      }
+    end
+
+    validations
+  end
+
+  # Hook antes del borrado para guardar contexto
+  def before_soft_delete(context)
+    context[:status] = status
+    context[:total_amount] = total_amount
+    context[:transaction_date] = transaction_date
+    context[:vehicle_plate] = vehicle_plate
+    context[:has_refueling] = vehicle_refueling.present?
+    context[:has_charge] = vehicle_electric_charge.present?
   end
 end
