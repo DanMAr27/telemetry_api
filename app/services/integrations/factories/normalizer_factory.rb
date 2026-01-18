@@ -25,6 +25,8 @@ module Integrations
           Normalizers::Geotab::ElectricChargeNormalizer.new
         when "trips"
           Normalizers::Geotab::TripNormalizer.new
+        when "odometer"
+          Normalizers::Geotab::OdometerNormalizer.new
         else
           raise ArgumentError, "Feature no soportada para Geotab: #{feature_key}"
         end

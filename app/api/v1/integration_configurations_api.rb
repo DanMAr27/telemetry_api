@@ -109,6 +109,24 @@ module V1
         }, 404)
       end
 
+      desc "Obtener lista simplificada para selectores" do
+        detail "Retorna lista de configuraciones optimizada para dropdowns/selectores"
+        success Entities::TenantIntegrationConfigurationSelectorEntity
+      end
+      params do
+        optional :tenant_id, type: Integer, desc: "Filtrar por tenant específico"
+      end
+      get "selector" do
+        configurations = TenantIntegrationConfiguration
+          .includes(:integration_provider, :tenant)
+          .joins(:integration_provider, :tenant)
+          .order("integration_providers.name ASC, tenants.name ASC")
+
+        configurations = configurations.where(tenant_id: params[:tenant_id]) if params[:tenant_id]
+
+        present configurations, with: Entities::TenantIntegrationConfigurationSelectorEntity
+      end
+
       desc "Obtener opciones disponibles para programación de sincronización" do
         detail "Retorna las opciones válidas para configurar la frecuencia de sincronización"
       end

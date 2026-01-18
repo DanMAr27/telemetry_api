@@ -46,6 +46,7 @@ module V1
     mount V1::VehicleElectricChargesApi
     mount V1::RawDataApi
     mount V1::FinancialTransactionsApi
+    mount V1::VehicleKmsApi
 
     # Configuración mínima de Swagger
     add_swagger_documentation(
