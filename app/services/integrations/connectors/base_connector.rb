@@ -22,6 +22,8 @@ module Integrations
           fetch_electric_charges(from_date, to_date)
         when "trips"
           fetch_trips(from_date, to_date)
+        when "odometer"
+          fetch_odometer_readings(from_date, to_date)
         else
           raise ArgumentError, "Feature no soportada: #{feature_key}"
         end
@@ -63,6 +65,11 @@ module Integrations
       # Obtener viajes en el rango de fechas
       def fetch_trips(from_date, to_date)
         raise NotImplementedError, "#{self.class} debe implementar #fetch_trips"
+      end
+
+      # Obtener lecturas de odómetro en el rango de fechas
+      def fetch_odometer_readings(from_date, to_date)
+        raise NotImplementedError, "#{self.class} debe implementar #fetch_odometer_readings"
       end
 
       protected

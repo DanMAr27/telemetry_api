@@ -331,6 +331,25 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_14_185222) do
     t.index ["vehicle_id"], name: "index_vehicle_electric_charges_on_vehicle_id"
   end
 
+  create_table "vehicle_kms", force: :cascade do |t|
+    t.bigint "vehicle_id", null: false
+    t.date "input_date", null: false
+    t.integer "km_reported", null: false
+    t.integer "km_normalized"
+    t.integer "status", default: 0, null: false
+    t.string "source_record_type"
+    t.bigint "source_record_id"
+    t.text "correction_notes"
+    t.jsonb "conflict_reasons", default: {}
+    t.datetime "discarded_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["discarded_at"], name: "index_vehicle_kms_on_discarded_at"
+    t.index ["source_record_type", "source_record_id"], name: "index_vehicle_kms_on_source_record"
+    t.index ["status"], name: "index_vehicle_kms_on_status"
+    t.index ["vehicle_id"], name: "index_vehicle_kms_on_vehicle_id"
+  end
+
   create_table "vehicle_provider_mappings", force: :cascade do |t|
     t.bigint "vehicle_id", null: false
     t.bigint "tenant_integration_configuration_id", null: false
@@ -457,6 +476,7 @@ ActiveRecord::Schema[8.0].define(version: 2026_01_14_185222) do
   add_foreign_key "vehicle_electric_charges", "integration_raw_data", column: "integration_raw_data_id"
   add_foreign_key "vehicle_electric_charges", "tenants"
   add_foreign_key "vehicle_electric_charges", "vehicles"
+  add_foreign_key "vehicle_kms", "vehicles"
   add_foreign_key "vehicle_provider_mappings", "tenant_integration_configurations"
   add_foreign_key "vehicle_provider_mappings", "vehicles"
   add_foreign_key "vehicle_refuelings", "financial_transactions"

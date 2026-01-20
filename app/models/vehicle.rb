@@ -7,6 +7,7 @@ class Vehicle < ApplicationRecord
 
   has_many :vehicle_refuelings, dependent: :destroy
   has_many :vehicle_electric_charges, dependent: :destroy
+  has_many :vehicle_kms, dependent: :destroy
 
   validates :name, presence: true, length: { maximum: 255 }
   validates :license_plate, presence: true,
