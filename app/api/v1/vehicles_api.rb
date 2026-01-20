@@ -275,25 +275,68 @@ module V1
           }, 404)
         end
 
-        desc "Eliminar vehículo" do
-          detail "Elimina un vehículo del sistema"
+        desc "Preview deletion impact for vehicle" do
+          detail "Analyzes the impact of deleting a vehicle without actually deleting it"
+        end
+        post "deletion-preview" do
+          vehicle = Vehicle.find(params[:id])
+          impact = SoftDelete::ImpactAnalyzer.new(vehicle).analyze
+
+          {
+            vehicle_id: params[:id],
+            can_delete: impact[:can_delete],
+            recommendation: impact[:recommendation],
+            blockers: impact[:blockers],
+            warnings: impact[:warnings],
+            impact: {
+              will_cascade: impact[:will_cascade],
+              will_nullify: impact[:will_nullify],
+              total_affected: impact[:total_affected]
+            },
+            estimated_time: impact[:estimated_time]
+          }
+        rescue ActiveRecord::RecordNotFound
+          error!({ error: "not_found", message: "Vehículo no encontrado" }, 404)
+        end
+
+        desc "Soft delete vehicle" do
+          detail "Soft deletes a vehicle with validations and audit trail"
+        end
+        params do
+          optional :force, type: Boolean, default: false, desc: "Force deletion ignoring warnings"
         end
         delete do
           vehicle = Vehicle.find(params[:id])
 
-          if vehicle.destroy
-            { success: true, message: "Vehículo eliminado exitosamente" }
+          coordinator = SoftDelete::DeletionCoordinator.new(
+            vehicle,
+            force: params[:force]
+          )
+
+          result = coordinator.call
+
+          if result[:success]
+            {
+              success: true,
+              message: result[:message],
+              vehicle_id: params[:id],
+              impact: {
+                cascade_count: result[:cascade_count],
+                nullify_count: result[:nullify_count]
+              },
+              audit_log_id: result[:audit_log]&.id
+            }
           else
             error!({
-              error: "deletion_error",
-              message: vehicle.errors.full_messages.join(", ")
+              error: "deletion_failed",
+              message: result[:message],
+              errors: result[:errors],
+              warnings: result[:warnings],
+              requires_force: result[:requires_force]
             }, 422)
           end
         rescue ActiveRecord::RecordNotFound
-          error!({
-            error: "not_found",
-            message: "Vehículo no encontrado"
-          }, 404)
+          error!({ error: "not_found", message: "Vehículo no encontrado" }, 404)
         end
 
         desc "Activar vehículo" do

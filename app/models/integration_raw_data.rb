@@ -1,5 +1,6 @@
 # app/models/integration_raw_data.rb
 class IntegrationRawData < ApplicationRecord
+  include SoftDeletable
   belongs_to :integration_sync_execution
   belongs_to :tenant_integration_configuration
   belongs_to :normalized_record, polymorphic: true, optional: true
@@ -24,7 +25,7 @@ class IntegrationRawData < ApplicationRecord
   scope :by_execution, ->(execution_id) { where(integration_sync_execution_id: execution_id) }
   scope :recent, -> { order(created_at: :desc) }
   scope :with_errors, -> { failed.order(created_at: :desc) }
-  scope :not_deleted, -> { where(deleted_at: nil) }
+  scope :not_deleted, -> { kept } # Alias para compatibilidad con código legacy
   scope :by_status, ->(status) { where(processing_status: status) }
   scope :retriable, -> {
     where(processing_status: "failed").select { |r| r.retriable_error? }
@@ -346,5 +347,24 @@ class IntegrationRawData < ApplicationRecord
         skipped: scope.where(processing_status: "skipped").count
       }
     end
+  end
+
+  # SOFT DELETE CONFIGURATION
+
+  # Relaciones en cascada: Si borramos el raw data, también borramos el registro normalizado
+  def soft_delete_cascade_relations
+    [
+      { name: :normalized_record }
+    ]
+  end
+
+  # Hook antes del borrado para guardar contexto
+  def before_soft_delete(context)
+    context[:processing_status] = processing_status
+    context[:external_id] = external_id
+    context[:provider_slug] = provider_slug
+    context[:feature_key] = feature_key
+    context[:has_normalized_record] = normalized_record.present?
+    context[:normalized_record_type] = normalized_record_type if normalized_record
   end
 end

@@ -199,53 +199,72 @@ module V1
         end
       end
 
-      desc "Eliminar uno o más registros" do
-        detail "Elimina permanentemente registros RAW (requiere confirmación)"
+      desc "Soft delete raw data record" do
+        detail "Soft deletes a raw data record with validations and audit trail"
       end
       params do
-        requires :ids, type: Array[Integer],
-                 desc: "IDs de registros a eliminar"
-        requires :reason, type: String,
-                 desc: "Motivo obligatorio de la eliminación"
-        optional :notes, type: String,
-                 desc: "Notas adicionales"
-        requires :confirm, type: Boolean,
-                 desc: "Confirmación explícita (debe ser true)"
+        requires :id, type: Integer, desc: "Raw data ID"
+        optional :force, type: Boolean, default: false, desc: "Force deletion ignoring warnings"
       end
-      post "delete" do
-        unless params[:confirm]
-          error!({
-            error: "confirmation_required",
-            message: "Debe confirmar la eliminación con confirm: true"
-          }, 422)
-        end
+      delete ":id" do
+        raw_data = IntegrationRawData.find(params[:id])
 
-        result = Integrations::RawData::DeleteService.new(
-          ids: params[:ids],
-          reason: params[:reason],
-          notes: params[:notes],
-          confirm: params[:confirm]
-        ).call
+        coordinator = SoftDelete::DeletionCoordinator.new(
+          raw_data,
+          force: params[:force]
+        )
 
-        if result.success?
+        result = coordinator.call
+
+        if result[:success]
           {
             success: true,
-            action: "delete",
-            summary: {
-              total: result.data[:total],
-              successful: result.data[:successful],
-              failed: result.data[:failed]
+            message: result[:message],
+            raw_data_id: params[:id],
+            impact: {
+              cascade_count: result[:cascade_count],
+              nullify_count: result[:nullify_count]
             },
-            results: result.data[:results],
-            duration_seconds: result.data[:duration_seconds],
-            message: result.message
+            audit_log_id: result[:audit_log]&.id
           }
         else
           error!({
-            error: "delete_failed",
-            message: result.errors.join(", ")
+            error: "deletion_failed",
+            message: result[:message],
+            errors: result[:errors],
+            warnings: result[:warnings],
+            requires_force: result[:requires_force]
           }, 422)
         end
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Raw data not found" }, 404)
+      end
+
+      desc "Preview deletion impact for raw data" do
+        detail "Analyzes the impact of deleting raw data without actually deleting it"
+      end
+      params do
+        requires :id, type: Integer, desc: "Raw data ID"
+      end
+      post ":id/deletion-preview" do
+        raw_data = IntegrationRawData.find(params[:id])
+        impact = SoftDelete::ImpactAnalyzer.new(raw_data).analyze
+
+        {
+          raw_data_id: params[:id],
+          can_delete: impact[:can_delete],
+          recommendation: impact[:recommendation],
+          blockers: impact[:blockers],
+          warnings: impact[:warnings],
+          impact: {
+            will_cascade: impact[:will_cascade],
+            will_nullify: impact[:will_nullify],
+            total_affected: impact[:total_affected]
+          },
+          estimated_time: impact[:estimated_time]
+        }
+      rescue ActiveRecord::RecordNotFound
+        error!({ error: "not_found", message: "Raw data not found" }, 404)
       end
     end
   end
