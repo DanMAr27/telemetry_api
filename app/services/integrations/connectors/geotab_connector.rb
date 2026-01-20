@@ -113,6 +113,26 @@ module Integrations
         handle_geotab_response(response, "Trip")
       end
 
+      def fetch_odometer_readings(from_date, to_date)
+        Rails.logger.info("→ Obteniendo lecturas de odómetro de Geotab (StatusData)...")
+        Rails.logger.info("  Rango: #{from_date} → #{to_date}")
+
+        payload = build_get_payload(
+          type_name: "StatusData",
+          from_date: from_date,
+          to_date: to_date,
+          additional_search: { diagnosticSearch: { id: "DiagnosticOdometerId" } }
+        )
+
+        response = http_post(API_BASE_URL, payload)
+
+        # Obtener todos los resultados crudos
+        all_results = handle_geotab_response(response, "StatusData (Odometer)")
+
+        # Filtrar para dejar solo el último por día por dispositivo
+        filter_last_daily_reading(all_results)
+      end
+
       protected
 
       def clear_authentication_state
@@ -226,6 +246,31 @@ module Integrations
 
       def generate_request_id
         SecureRandom.uuid
+      end
+
+      def filter_last_daily_reading(results)
+        return [] if results.empty?
+
+        # Agrupar por device.id
+        by_device = results.group_by { |r| r.dig("device", "id") }
+
+        filtered_results = []
+
+        by_device.each do |device_id, device_records|
+           # Agrupar por fecha (YYYY-MM-DD)
+           # dateTime viene como "2025-01-03T15:01:01.496Z"
+           by_day = device_records.group_by { |r| r["dateTime"][0..9] }
+
+           by_day.each do |day, day_records|
+             # Tomar el último registro del día (mayor dateTime)
+             latest_record = day_records.max_by { |r| r["dateTime"] }
+             filtered_results << latest_record if latest_record
+           end
+        end
+
+        Rails.logger.info("✓ Filtrado de odómetros: #{results.count} recibidos -> #{filtered_results.count} retenidos (último diario)")
+
+        filtered_results
       end
     end
   end
